@@ -14,43 +14,17 @@ def get_lengths_path(task_cache_path: str):
     return os.path.join(task_cache_path, "lengths.p")
 
 
-class ExamplePositionLookup:
-    def __init__(self, lengths):
-        self.lengths = lengths
-        self.zero_prefixed_cum_lengths = np.concatenate([[0], lengths.cumsum()])
-        self.cum_lengths = self.zero_prefixed_cum_lengths[1:]
-        self.total = self.cum_lengths[-1]
-
-    def lookup(self, indices):
-        example_indices = np.less_equal(self.cum_lengths.reshape(1, -1), indices.reshape(-1, 1)).sum(1)
-        position_indices = indices - self.zero_prefixed_cum_lengths[example_indices]
-        return example_indices, position_indices
-
-    def sample(self, n, rng=None):
-        if rng is None:
-            rng = np.random
-        elif isinstance(rng, int):
-            rng = np.random.RandomState(rng)
-        return self.lookup(rng.randint(self.total, size=n))
-
-    def reverse_lookup(self, example_indices, position_indices):
-        return self.zero_prefixed_cum_lengths[example_indices] + position_indices
-
-    @classmethod
-    def from_path(cls, path):
-        return cls(lengths=torch.load(path))
-
-
 def compute_lengths(task, task_cache: caching.ChunkedFilesDataCache):
+    # shape: (n, ) for single-input
+    # shape: (n, k) for multiple-choice
     dataloader = shared_runner.get_eval_dataloader_from_cache(
         eval_cache=task_cache,
         task=task,
-        eval_batch_size=1000,
+        eval_batch_size=10000,
     )
     lengths_ls = []
     for batch, batch_metadata in dataloader:
-        seq_len = batch.input_mask.shape[-1]
-        lengths_ls.append(batch.input_mask.view(-1, seq_len).sum(-1).cpu().numpy())
+        lengths_ls.append(batch.input_mask.sum(-1).cpu().numpy())
     lengths = np.concatenate(lengths_ls)
     return lengths
 
@@ -64,6 +38,15 @@ def write_lengths_from_paths(task_config_path: str, task_cache_path: str):
 
 def write_tok_indices(ip_lookup: weights_utils.InputPositionLookup,
                       num_samples, output_path, rng=None):
+    """
+    TOK and CLS have slightly differently logic. We want e.g. 10k examples in either case
+
+    TOK will sample 10k (example_i, token_i) pairs, and then group them by example_i.
+    So len(grouped_input_indices) = len(grouped_position_indices) < 10K
+
+    CLS samples 10K (example_i). But we don't do grouping, so we can still average over 10K
+    So len(grouped_input_indices) = len(grouped_position_indices) = 10K
+    """
     input_indices, position_indices = ip_lookup.sample(num_samples, rng=rng)
     grouped_input_indices, grouped_position_indices = \
         weights_utils.group_input_position_indices(
@@ -80,6 +63,9 @@ def write_tok_indices(ip_lookup: weights_utils.InputPositionLookup,
 
 def write_cls_indices(task, ip_lookup: weights_utils.InputPositionLookup,
                       num_samples, output_path):
+    """
+    write_tok_indices
+    """
     num_examples = len(ip_lookup.lengths)
     if task.TASK_TYPE == tasks.TaskTypes.MULTIPLE_CHOICE:
         num_inputs_per_example = task.NUM_CHOICES
@@ -93,7 +79,8 @@ def write_cls_indices(task, ip_lookup: weights_utils.InputPositionLookup,
                 size=num_samples,
                 replace=num_samples > num_inputs,
             ),
-            "grouped_position_indices": np.zeros(num_inputs).reshape(-1, 1),
+            # assume position-0 for CLS
+            "grouped_position_indices": np.zeros(num_samples).reshape(-1, 1),
         },
         output_path,
     )

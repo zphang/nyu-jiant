@@ -51,8 +51,12 @@ def sort_by_ls(ls, order_ls):
 
 class InputPositionLookup:
     def __init__(self, lengths):
+        """
+        Works on a per-INPUT level, not per-EXAMPLE. See: Multiple Choice
+        """
         self.lengths = lengths
-        self.zero_prefixed_cum_lengths = np.concatenate([[0], lengths.cumsum()])
+        self.flattened_lengths = lengths.reshape(-1)
+        self.zero_prefixed_cum_lengths = np.concatenate([[0], self.flattened_lengths.cumsum()])
         self.cum_lengths = self.zero_prefixed_cum_lengths[1:]
         self.total = self.cum_lengths[-1]
 

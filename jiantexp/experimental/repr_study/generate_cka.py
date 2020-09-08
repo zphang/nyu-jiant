@@ -10,9 +10,8 @@ import jiant.utils.zconf as zconf
 
 import jiant.shared.initialization as initialization
 import jiant.proj.main.modeling.model_setup as model_setup
-import jiant.proj.main.modeling.taskmodels as taskmodels
 import jiant.proj.main.components.container_setup as container_setup
-from jiant.proj.main.modeling.primary import JiantModel
+from jiant.proj.main.modeling.primary import JiantModel, wrap_jiant_forward
 import jiant.tasks as tasks
 import jiant.shared.runner as shared_runner
 import jiant.shared.caching as caching
@@ -125,11 +124,13 @@ class DataObj:
         grouped_input_indices = loaded["grouped_input_indices"]
         grouped_position_indices = loaded["grouped_position_indices"]
         task_cache = caching.ChunkedFilesDataCache(task_cache_path)
+        # Account for multiple-choice
+        example_indices = np.array(grouped_input_indices) // get_num_inputs(task)
         dataloader = shared_runner.get_eval_dataloader_from_cache(
             eval_cache=task_cache,
             task=task,
             eval_batch_size=batch_size,
-            explicit_subset=np.array(grouped_input_indices) // get_num_inputs(task),
+            explicit_subset=example_indices,
         )
         return cls(
             dataloader=dataloader,
@@ -182,12 +183,14 @@ def compute_cka(act_a, act_b, device, cka_kernel):
     return collated
 
 
-def get_hidden_act(jiant_model: JiantModel, batch):
-    encoder_output = taskmodels.get_output_from_encoder_and_batch(
-        encoder=jiant_model.encoder,
+def get_hidden_act(jiant_model: JiantModel, batch, task):
+    model_output = wrap_jiant_forward(
+        jiant_model=jiant_model,
         batch=batch,
+        task=task,
+        compute_loss=False,
     )
-    raw_hidden = encoder_output.other[0]
+    raw_hidden = model_output.other[0]
     hidden_act = torch.stack(raw_hidden, dim=2)
     return hidden_act
 
@@ -206,6 +209,7 @@ def compute_activations_from_model(data_obj: DataObj,
             hidden_act = get_hidden_act(
                 jiant_model=jiant_model,
                 batch=batch,
+                task=task,
             )
 
             if task.TASK_TYPE == tasks.TaskTypes.MULTIPLE_CHOICE:
@@ -244,11 +248,19 @@ def compute_activations_from_model(data_obj: DataObj,
 
 def load_model(jiant_model: JiantModel, model_path: str, device) -> JiantModel:
     state_dict = torch.load(model_path, map_location="cpu")
-    model_setup.delegate_load(
-        jiant_model=jiant_model,
-        load_mode="partial",
-        weights_dict=state_dict,
-    )
+    first_key = list(state_dict)[0]
+    if first_key.startswith("encoder."):
+        model_setup.delegate_load(
+            jiant_model=jiant_model,
+            load_mode="partial",
+            weights_dict=state_dict,
+        )
+    else:
+        model_setup.delegate_load(
+            jiant_model=jiant_model,
+            load_mode="from_transformers",
+            weights_dict=state_dict,
+        )
     jiant_model.to(device)
     return jiant_model
 
