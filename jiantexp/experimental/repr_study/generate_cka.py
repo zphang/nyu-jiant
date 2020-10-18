@@ -72,6 +72,7 @@ def main(args):
         model_arch = ModelArchitectures.from_model_type(model_type=args.model_type)
         if model_arch == ModelArchitectures.ROBERTA:
             jiant_model.encoder.encoder.output_hidden_states = True
+            jiant_model.encoder.encoder.config.output_hidden_states = True
         else:
             raise RuntimeError()
         data_obj = DataObj.from_path(
