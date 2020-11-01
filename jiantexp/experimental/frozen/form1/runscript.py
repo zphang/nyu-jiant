@@ -1,17 +1,20 @@
 import os
 import torch
 
+
 import jiant.proj.main.runner as jiant_runner
 import jiant.proj.main.components.container_setup as container_setup
 import jiant.proj.main.components.evaluate as jiant_evaluate
 import jiant.shared.initialization as initialization
+import jiant.shared.distributed as distributed
 import jiant.shared.model_setup as model_setup
+import jiant.utils.torch_utils as torch_utils
 import jiant.utils.python.io as py_io
 import jiant.utils.zconf as zconf
 
-import jiantexp.experimental.adapterfusion.model_setup as adapterfusion_model_setup
-import jiantexp.experimental.adapterfusion.metarunner as adapterfusion_metarunner
-import jiantexp.experimental.adapterfusion.runner as adapterfusion_runner
+import jiantexp.experimental.frozen.form1.model_setup as form1_model_setup
+import jiantexp.experimental.frozen.form1.metarunner as form1_metarunner
+import jiantexp.experimental.frozen.form1.runner as form1_runner
 
 
 @zconf.run_config
@@ -22,7 +25,7 @@ class RunConfiguration(zconf.RunConfig):
 
     # === Model parameters === #
     model_type = zconf.attr(type=str, required=True)
-    model_tokenizer_path = zconf.attr(default=None, type=str)
+    pooler_config = zconf.attr(default=None, type=str)
 
     # === Running Setup === #
     do_train = zconf.attr(action="store_true")
@@ -52,11 +55,6 @@ class RunConfiguration(zconf.RunConfig):
     server_ip = zconf.attr(default="", type=str)
     server_port = zconf.attr(default="", type=str)
 
-    # ===
-    adapter_config = zconf.attr(default="pfeiffer", type=str)
-    adapter_tuning_mode = zconf.attr(default="single", type=str)  # <-- require this
-    adapter_path_list = zconf.attr(default=None, type=str)
-
 
 @zconf.run_config
 class ResumeConfiguration(zconf.RunConfig):
@@ -69,16 +67,15 @@ def setup_runner(
     quick_init_out,
     verbose: bool = True,
 ) -> jiant_runner.JiantRunner:
-    jiant_model = adapterfusion_model_setup.setup_adapterfusion_jiant_model(
-        model_type=args.model_type,
-        raw_adapter_config=args.adapter_config,
-        adapter_tuning_mode=args.adapter_tuning_mode,
-        adapter_path_list=args.adapter_path_list,
-        tokenizer_path=args.model_tokenizer_path,
-        task_dict=jiant_task_container.task_dict,
-        taskmodels_config=jiant_task_container.taskmodels_config,
-    )
-    jiant_model.to(quick_init_out.device)
+    with distributed.only_first_process(local_rank=args.local_rank):
+        # load the model
+        jiant_model = form1_model_setup.setup_jiant_model(
+            model_type=args.model_type,
+            pooler_config=args.pooler_config,
+            task_dict=jiant_task_container.task_dict,
+            taskmodels_config=jiant_task_container.taskmodels_config,
+        )
+        jiant_model.to(quick_init_out.device)
 
     optimizer_scheduler = model_setup.create_optimizer(
         model=jiant_model,
@@ -104,7 +101,7 @@ def setup_runner(
         fp16=args.fp16,
         max_grad_norm=args.max_grad_norm,
     )
-    runner = adapterfusion_runner.AdapterFusionRunner(
+    runner = jiant_runner.JiantRunner(
         jiant_task_container=jiant_task_container,
         jiant_model=jiant_model,
         optimizer_scheduler=optimizer_scheduler,
@@ -137,9 +134,8 @@ def run_loop(args: RunConfiguration, checkpoint=None):
             save_path=os.path.join(args.output_dir, "checkpoint.p"),
         )
         if args.do_train:
-            metarunner = adapterfusion_metarunner.AdapterFusionMetarunner(
+            metarunner = form1_metarunner.Form1Metarunner(
                 runner=runner,
-                adapter_tuning_mode=args.adapter_tuning_mode,
                 save_every_steps=args.save_every_steps,
                 eval_every_steps=args.eval_every_steps,
                 save_checkpoint_every_steps=args.save_checkpoint_every_steps,
@@ -157,9 +153,12 @@ def run_loop(args: RunConfiguration, checkpoint=None):
             metarunner.run_train_loop()
 
         if args.do_save:
-            adapterfusion_runner.save_model(
+            torch.save(
+                torch_utils.get_model_for_saving(runner.jiant_model).state_dict(),
+                os.path.join(args.output_dir, "model.p"),
+            )
+            form1_runner.save_model(
                 model=runner.jiant_model,
-                adapter_tuning_mode=args.adapter_tuning_mode,
                 output_dir=args.output_dir,
                 file_name="model",
             )
@@ -214,9 +213,9 @@ def resume(checkpoint_path):
 
 def run_with_continue(cl_args):
     run_args = RunConfiguration.default_run_cli(cl_args=cl_args)
-    if os.path.exists(os.path.join(run_args.output_dir, "done_file")) or os.path.exists(
+    if not run_args.force_overwrite and (os.path.exists(os.path.join(run_args.output_dir, "done_file")) or os.path.exists(
         os.path.join(run_args.output_dir, "val_metrics.json")
-    ):
+    )):
         print("Already Done")
         return
     elif run_args.save_checkpoint_every_steps and os.path.exists(

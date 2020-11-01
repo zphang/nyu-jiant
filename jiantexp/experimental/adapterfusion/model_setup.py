@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Union, Optional
 import jiant.proj.main.components.container_setup as container_setup
 import jiant.shared.model_setup as model_setup
 from jiant.shared.model_resolution import ModelArchitectures, register_from_encoder
@@ -6,6 +6,7 @@ from jiant.proj.main.modeling.model_setup import create_taskmodel, get_taskmodel
 import jiant.proj.main.modeling.primary as primary
 from jiant.tasks import Task
 import jiant.utils.python.datastructures as datastructures
+import jiant.utils.python.io as py_io
 
 import jiantexp.experimental.adapterfusion.ext.modeling_bert as modeling_bert
 import jiantexp.experimental.adapterfusion.ext.modeling_roberta as modeling_roberta
@@ -35,9 +36,10 @@ def setup_adapterfusion_jiant_model(
     model_type: str,
     tokenizer_path: str,
     task_dict: Dict[str, Task],
+    taskmodels_config: container_setup.TaskmodelsConfig,
     raw_adapter_config: str,
     adapter_tuning_mode: str,
-    taskmodels_config: container_setup.TaskmodelsConfig,
+    adapter_path_list: Optional[Union[str, list]]
 ):
     model_arch = ModelArchitectures.from_model_type(model_type)
     tokenizer = model_setup.get_tokenizer(model_type=model_type, tokenizer_path=tokenizer_path)
@@ -46,15 +48,27 @@ def setup_adapterfusion_jiant_model(
     # Setup adapters
     taskmodel_name_list = list(taskmodels_config.task_to_taskmodel_map.values())
     adapter_config = adapter_config_lib.AdapterConfig.load(raw_adapter_config)
-    for taskmodel_name in taskmodel_name_list:
-        encoder.add_adapter(taskmodel_name, adapter_utils.AdapterType.text_task, config=adapter_config)
-
     if adapter_tuning_mode == "single":
+        taskmodel_name = datastructures.take_one(taskmodel_name_list)
+        encoder.add_adapter(taskmodel_name, adapter_utils.AdapterType.text_task, config=adapter_config)
         encoder.set_active_adapters(taskmodel_name_list)
         encoder.train_adapter(taskmodel_name_list)
     elif adapter_tuning_mode == "fusion":
-        encoder.add_fusion(taskmodel_name_list, "dynamic")
-        encoder.train_fusion(taskmodel_name_list)
+        if adapter_path_list is None:
+            raise RuntimeError("adapter_path_list required for adapter_tuning_mode=fusion")
+        elif isinstance(adapter_path_list, str):
+            adapter_path_list = py_io.read_json(adapter_path_list)
+        adapter_setup = [[]]  # <-- Not sure why it wants a list of lists
+        for adapter_path in adapter_path_list:
+            adapter_name = encoder.load_adapter(
+                adapter_name_or_path=adapter_path,
+                adapter_type="text_task",
+                config=adapter_config,
+                with_head=False,
+            )
+            adapter_setup[0].append(adapter_name)
+        encoder.add_fusion(adapter_setup[0], "dynamic")
+        encoder.train_fusion(adapter_setup)
 
     taskmodels_dict = {
         taskmodel_name: create_taskmodel(
