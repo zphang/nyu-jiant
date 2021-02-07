@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import jiant.utils.zconf as zconf
+import jiant.utils.transformer_utils as transformer_utils
 
 import jiant.shared.initialization as initialization
 import jiant.proj.main.modeling.model_setup as model_setup
@@ -17,7 +18,6 @@ import jiant.shared.runner as shared_runner
 import jiant.shared.caching as caching
 import jiantexp.experimental.repr_study.cka as cka
 from torch.utils.data.dataloader import DataLoader
-from jiant.shared.model_setup import ModelArchitectures
 
 
 @zconf.run_config
@@ -69,12 +69,6 @@ def main(args):
                 {task.name: task.name}
             ),
         )
-        model_arch = ModelArchitectures.from_model_type(model_type=args.model_type)
-        if model_arch == ModelArchitectures.ROBERTA:
-            jiant_model.encoder.encoder.output_hidden_states = True
-            jiant_model.encoder.encoder.config.output_hidden_states = True
-        else:
-            raise RuntimeError()
         data_obj = DataObj.from_path(
             task=task,
             task_cache_path=args.task_cache_path,
@@ -185,13 +179,14 @@ def compute_cka(act_a, act_b, device, cka_kernel):
 
 
 def get_hidden_act(jiant_model: JiantModel, batch, task):
-    model_output = wrap_jiant_forward(
-        jiant_model=jiant_model,
-        batch=batch,
-        task=task,
-        compute_loss=False,
-    )
-    raw_hidden = model_output.other[0]
+    with transformer_utils.output_hidden_states_context(encoder=jiant_model.encoder):
+        model_output = wrap_jiant_forward(
+            jiant_model=jiant_model,
+            batch=batch,
+            task=task,
+            compute_loss=False,
+        )
+    raw_hidden = model_output.other[-1]
     hidden_act = torch.stack(raw_hidden, dim=2)
     return hidden_act
 

@@ -18,7 +18,6 @@ def save_model_with_metadata(model: nn.Module, metadata: dict, output_dir: str, 
 
 def save_model(model: nn.Module, output_dir: str, file_name="model"):
     raw_state_dict = torch_utils.get_model_for_saving(model).state_dict()
-    save_directory = os.path.join(output_dir, file_name)
     state_dict = {
         n: p
         for n, p in raw_state_dict.items()
