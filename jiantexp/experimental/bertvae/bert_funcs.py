@@ -260,11 +260,12 @@ class BertVaeModel(nn.Module):
         if "prior_label" in batch:
             loss_fct = nn.CrossEntropyLoss(
                 ignore_index=BertDataWrapper.NON_MASKED_TARGET,  # Clean up?
+                reduction="sum",
             )
             masked_lm_loss = loss_fct(
                 prediction_scores.view(-1, self.mlm_model.config.vocab_size),
                 target=batch["prior_label"].view(-1)
-            )
+            ) / batch_size
         return MaskedLMOutput(
             loss=masked_lm_loss,
             logits=prediction_scores,
@@ -306,7 +307,9 @@ class BertVaeModel(nn.Module):
         # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
         # https://arxiv.org/abs/1312.6114
         # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-        kl_loss = -0.5 * torch.mean(1 + z_logvar - z_loc.pow(2) - z_logvar.exp())
+        batch_size = z_loc.shape[0]
+        kl_loss_sum = -0.5 * torch.sum(1 + z_logvar - z_loc.pow(2) - z_logvar.exp())
+        kl_loss = kl_loss_sum / batch_size
         return kl_loss
 
 
