@@ -14,9 +14,10 @@ import jiant.utils.display as display
 @dataclass
 class BertDataWrapper:
     # Constants
-    PRIOR_TOKEN_ID = 1  # [unused1]
-    POSTERIOR_TOKEN_ID = 2  # [unused2]
-    RESERVED_FOR_Z_TOKEN_ID = 3  # [unused3]
+    DECODER_TOKEN_ID = 1  # [unused1]
+    PRIOR_TOKEN_ID = 2  # [unused2]
+    POSTERIOR_TOKEN_ID = 3  # [unused3]
+    RESERVED_FOR_Z_TOKEN_ID = 4  # [unused4]
     CLS_TOKEN_ID = 101
     SEP_TOKEN_ID = 102
     MASK_TOKEN_ID = 103
@@ -26,9 +27,14 @@ class BertDataWrapper:
     tokenizer: transformers.PreTrainedTokenizerBase
     max_seq_length: int = 256  # actual model sequence length
     num_workers: int = 1
+    mlm_probability: float = 0.15
 
     def __post_init__(self):
-        self.data_collator = transformers.DataCollatorForLanguageModeling(tokenizer=self.tokenizer)
+        # noinspection PyTypeChecker
+        self.data_collator = transformers.DataCollatorForLanguageModeling(
+            tokenizer=self.tokenizer,
+            mlm_probability=self.mlm_probability,
+        )
         self.max_text_length = (self.max_seq_length - 3) // 2
 
     def prep_bert_inputs(self, text_token_ids: List[int], tokenizer, data_collator):
@@ -39,25 +45,30 @@ class BertDataWrapper:
 
         masked_tokens = masked_tokens[0].tolist()
         masked_labels = masked_labels[0].tolist()
-        # [PRIOR] mask(x) [SEP] z [SEP]
+        # [DECODER] mask(x) [SEP] z [SEP]
+        decoder_input = (
+            [self.DECODER_TOKEN_ID] + masked_tokens + [tokenizer.sep_token_id]
+            + [self.RESERVED_FOR_Z_TOKEN_ID] + [tokenizer.sep_token_id]
+        )
+        # [DECODER] x [SEP] _ [SEP]
+        decoder_label = (
+            [self.NON_MASKED_TARGET] + masked_labels + [self.NON_MASKED_TARGET] * 3
+        )
+        assert len(decoder_input) == len(decoder_label)
+        # [PRIOR] mask(x) [SEP]
         prior_input = (
-                [self.PRIOR_TOKEN_ID] + masked_tokens + [tokenizer.sep_token_id]
-                + [self.RESERVED_FOR_Z_TOKEN_ID] + [tokenizer.sep_token_id]
+            [self.PRIOR_TOKEN_ID] + masked_tokens + [tokenizer.sep_token_id]
         )
-        # [PRIOR] x [SEP] _ [SEP]
-        prior_label = (
-                [self.NON_MASKED_TARGET] + masked_labels + [self.NON_MASKED_TARGET] * 3
-        )
-        assert len(prior_input) == len(prior_label)
         # [POSTERIOR] x [SEP] mask(x) [SEP]
         posterior_input = (
                 [self.POSTERIOR_TOKEN_ID] + text_token_ids + [tokenizer.sep_token_id]
                 + masked_tokens + [tokenizer.sep_token_id]
         )
         return {
+            "decoder_input": decoder_input,
+            "decoder_label": decoder_label,
+            "decoder_z_index": len(decoder_input) - 2,
             "prior_input": prior_input,
-            "prior_label": prior_label,
-            "prior_z_index": len(prior_input) - 2,
             "posterior_input": posterior_input,
         }
 
@@ -69,20 +80,24 @@ class BertDataWrapper:
         )
 
     def collate_fn(self, examples):
+        decoder_input_ls = [example["decoder_input"] for example in examples]
+        decoder_label_ls = [example["decoder_label"] for example in examples]
+        decoder_z_index_ls = [example["decoder_z_index"] for example in examples]
         prior_input_ls = [example["prior_input"] for example in examples]
-        prior_label_ls = [example["prior_label"] for example in examples]
-        prior_z_index_ls = [example["prior_z_index"] for example in examples]
         posterior_input_ls = [example["posterior_input"] for example in examples]
 
+        decoder_input_outs = self.tokenizer.pad({"input_ids": decoder_input_ls}, return_tensors="pt")
+        decoder_label_outs = self.tokenizer.pad({"input_ids": decoder_label_ls}, return_tensors="pt")
         prior_input_outs = self.tokenizer.pad({"input_ids": prior_input_ls}, return_tensors="pt")
-        prior_label_outs = self.tokenizer.pad({"input_ids": prior_label_ls}, return_tensors="pt")
         posterior_input_outs = self.tokenizer.pad({"input_ids": posterior_input_ls}, return_tensors="pt")
-        # prior_input_outs["attention_mask"] should be the same as prior_label_outs["attention_mask"]
+        # decoder_input_outs["attention_mask"] should be the same as decoder_label_outs["attention_mask"]
         return {
+            "decoder_input": decoder_input_outs["input_ids"],
+            "decoder_mask": decoder_input_outs["attention_mask"],
+            "decoder_label": decoder_label_outs["input_ids"],
+            "decoder_z_index": torch.tensor(decoder_z_index_ls).long(),
             "prior_input": prior_input_outs["input_ids"],
-            "prior_label": prior_label_outs["input_ids"],
             "prior_mask": prior_input_outs["attention_mask"],
-            "prior_z_index": torch.tensor(prior_z_index_ls).long(),
             "posterior_input": posterior_input_outs["input_ids"],
             "posterior_mask": posterior_input_outs["attention_mask"],
         }
@@ -185,19 +200,22 @@ class BertDataWrapper:
                 in zip(text_token_ids, masked_tokens)
             ]
             prepped_inputs = {
+                "decoder_input": (
+                        [self.DECODER_TOKEN_ID] + masked_tokens + [self.tokenizer.sep_token_id]
+                        + [self.RESERVED_FOR_Z_TOKEN_ID] + [self.tokenizer.sep_token_id]
+                ),
+                "decoder_label": (
+                        [self.NON_MASKED_TARGET] + masked_labels + [self.NON_MASKED_TARGET] * 3
+                ),
                 "prior_input": (
                         [self.PRIOR_TOKEN_ID] + masked_tokens + [self.tokenizer.sep_token_id]
-                        + [self.RESERVED_FOR_Z_TOKEN_ID] + [self.tokenizer.sep_token_id]
                 ),
                 "posterior_input": (
                         [self.POSTERIOR_TOKEN_ID] + text_token_ids + [self.tokenizer.sep_token_id]
                         + masked_tokens + [self.tokenizer.sep_token_id]
                 ),
-                "prior_label": (
-                        [self.NON_MASKED_TARGET] + masked_labels + [self.NON_MASKED_TARGET] * 3
-                ),
             }
-            prepped_inputs["prior_z_index"] = len(prepped_inputs["prior_input"]) - 2,
+            prepped_inputs["decoder_z_index"] = len(prepped_inputs["decoder_input"]) - 2,
             prepped_inputs_list.append(prepped_inputs)
         return self.collate_fn(prepped_inputs_list)
 
@@ -210,21 +228,21 @@ class BertVaeModel(nn.Module):
         self.z_loc_layer = nn.Linear(self.hidden_size, self.hidden_size)
         self.z_scale_layer = nn.Linear(self.hidden_size, self.hidden_size)
 
-    def posterior_forward(self, batch):
+    def prior_forward(self, batch):
         """
-        [POSTERIOR] x [SEP] mask(x) [SEP]
+        [PRIOR] mask(x) [SEP]
           ->
-        stat(z)
+        stat(z | mask(x))
 
         Requires:
-            batch["posterior_input"]
-            batch["posterior_mask"]
+            batch["prior_input"]
+            batch["prior_mask"]
         """
-        out = self.mlm_model.bert(
-            input_ids=batch["posterior_input"],
-            attention_mask=batch["posterior_mask"],
+        outputs = self.mlm_model.bert(
+            input_ids=batch["prior_input"],
+            attention_mask=batch["prior_mask"],
         )
-        z_raw = out["last_hidden_state"][:, 0, :]  # get CLS (first token)
+        z_raw = outputs.last_hidden_state[:, 0, :]  # get CLS (first token)
         z_loc = self.z_loc_layer(z_raw)
         z_logvar = self.z_scale_layer(z_raw)
         return {
@@ -232,39 +250,61 @@ class BertVaeModel(nn.Module):
             "z_logvar": z_logvar,
         }
 
-    def prior_forward(self, batch, z_sample):
+    def posterior_forward(self, batch):
         """
-        [PRIOR] mask(x) [SEP] z [SEP]
+        [POSTERIOR] x [SEP] mask(x) [SEP]
           ->
-        [PRIOR] x [SEP] _ [SEP]
+        stat(z | x, mask(x))
 
         Requires:
-            batch["prior_input"]
-            batch["prior_mask"]
-            batch["prior_z_index"]
-        Optional:
-            batch["prior_label"]
+            batch["posterior_input"]
+            batch["posterior_mask"]
         """
-        token_only_embeddings = self.mlm_model.bert.embeddings.word_embeddings(batch["prior_input"])
+        outputs = self.mlm_model.bert(
+            input_ids=batch["posterior_input"],
+            attention_mask=batch["posterior_mask"],
+        )
+        z_raw = outputs.last_hidden_state[:, 0, :]  # get CLS (first token)
+        z_loc = self.z_loc_layer(z_raw)
+        z_logvar = self.z_scale_layer(z_raw)
+        return {
+            "z_loc": z_loc,
+            "z_logvar": z_logvar,
+        }
+
+    def decoder_forward(self, batch, z_sample):
+        """
+        [DECODER] mask(x) [SEP] z [SEP]
+          ->
+        [DECODER] x [SEP] _ [SEP]
+
+        Requires:
+            batch["decoder_input"]
+            batch["decoder_mask"]
+            batch["decoder_z_index"]
+        Optional:
+            batch["decoder_label"]
+        """
+        token_only_embeddings = self.mlm_model.bert.embeddings.word_embeddings(batch["decoder_input"])
         batch_size = z_sample.shape[0]
         token_only_embeddings[
             torch.arange(batch_size),
-            batch["prior_z_index"],
+            batch["decoder_z_index"],
         ] = z_sample
         outputs = self.mlm_model.bert(
-            attention_mask=batch["prior_mask"],
+            attention_mask=batch["decoder_mask"],
             inputs_embeds=token_only_embeddings,
         )
         prediction_scores = self.mlm_model.cls(outputs.last_hidden_state)
         masked_lm_loss = None
-        if "prior_label" in batch:
+        if "decoder_label" in batch:
             loss_fct = nn.CrossEntropyLoss(
                 ignore_index=BertDataWrapper.NON_MASKED_TARGET,  # Clean up?
                 reduction="sum",
             )
             masked_lm_loss = loss_fct(
                 prediction_scores.view(-1, self.mlm_model.config.vocab_size),
-                target=batch["prior_label"].view(-1)
+                target=batch["decoder_label"].view(-1)
             ) / batch_size
         return MaskedLMOutput(
             loss=masked_lm_loss,
@@ -273,44 +313,52 @@ class BertVaeModel(nn.Module):
             attentions=outputs.attentions,
         )
 
-    def forward(self, batch, do_sample=True):
+    def forward(self, batch):
         posterior_output = self.posterior_forward(batch)
-        if do_sample:
-            z_sample = self.sample_z(z_loc=posterior_output["z_loc"], z_logvar=posterior_output["z_logvar"])
-        else:
-            z_sample = posterior_output["z_loc"]
-        mlm_output = self.prior_forward(batch=batch, z_sample=z_sample)
+        prior_output = self.prior_forward(batch)
+        z_sample = self.sample_z(z_loc=posterior_output["z_loc"], z_logvar=posterior_output["z_logvar"])
+        mlm_output = self.decoder_forward(batch=batch, z_sample=z_sample)
         results = {
             "z_sample": z_sample,
             "z_loc": posterior_output["z_loc"],
             "z_logvar": posterior_output["z_logvar"],
             "logits": mlm_output.logits,
         }
-        if "prior_label" in batch:
+        if "decoder_label" in batch:
             results["recon_loss"] = mlm_output.loss
             results["kl_loss"] = self.kl_loss_function(
                 z_loc=posterior_output["z_loc"],
                 z_logvar=posterior_output["z_logvar"],
+                prior_z_loc=prior_output["z_loc"],
+                prior_z_logvar=prior_output["z_logvar"],
             )
             results["total_loss"] = results["recon_loss"] + results["kl_loss"]
         return results
 
     @classmethod
     def sample_z(cls, z_loc, z_logvar):
-        std = torch.exp(0.5*z_logvar) + 1e-5
+        std = torch.exp(0.5 * z_logvar) + 1e-5
         eps = torch.randn_like(std)
         return z_loc + eps*std
 
     @classmethod
-    def kl_loss_function(cls, z_loc, z_logvar):
+    def kl_loss_function(cls, z_loc, z_logvar, prior_z_loc=None, prior_z_logvar=None):
         # see Appendix B from VAE paper:
         # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-        # https://arxiv.org/abs/1312.6114
-        # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+        # https://arxiv.org/abs/1312.6114, Section Appendix B
+        # also https://stats.stackexchange.com/questions/7440/kl-divergence-between-two-univariate-gaussians
         batch_size = z_loc.shape[0]
-        kl_loss_sum = -0.5 * torch.sum(1 + z_logvar - z_loc.pow(2) - z_logvar.exp())
+        if prior_z_loc is None and prior_z_logvar is None:
+            # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+            kl_loss_sum = -0.5 * torch.sum(1 + z_logvar - z_loc.pow(2) - z_logvar.exp())
+        else:
+            kl_loss_sum = -0.5 * torch.sum(
+                1 + z_logvar - prior_z_logvar
+                - (z_logvar.exp() + (z_loc - prior_z_loc).pow(2)) / prior_z_logvar.exp()
+            )
         kl_loss = kl_loss_sum / batch_size
         return kl_loss
+
 
 
 class BertVaeTrainer:
@@ -330,10 +378,10 @@ class BertVaeTrainer:
 
         self.device = torch.device("cuda:0")
         self.tokenizer: Any = self.bert_data_wrapper.tokenizer
-        self.dummy_batch = move_to_device(self.bert_data_wrapper.get_dummy_batch(), device=self.device)
 
         self.optimizer = None
         self.scheduler = None
+        self.dummy_batch = None
 
     def setup(self):
         self.optimizer = AdamW(self.bert_vae_model.parameters(), lr=self.args.learning_rate)
@@ -342,6 +390,7 @@ class BertVaeTrainer:
             num_warmup_steps=self.args.num_steps / 10,
             num_training_steps=self.args.num_steps,
         )
+        self.dummy_batch = move_to_device(self.bert_data_wrapper.get_dummy_batch(), device=self.device)
 
     def do_train_val(self):
         self.bert_vae_model.train()
@@ -384,7 +433,7 @@ class BertVaeTrainer:
             total_size = 0
             for batch in display.tqdm(self.val_dataloader):
                 batch = move_to_device(batch, device=self.device)
-                batch_size = len(batch["prior_label"])
+                batch_size = len(batch["decoder_label"])
                 vae_output = self.bert_vae_model(batch=batch)
                 agg_total_loss += vae_output["total_loss"].item() * batch_size
                 agg_recon_loss += vae_output["recon_loss"].item() * batch_size
@@ -412,8 +461,8 @@ class BertVaeTrainer:
             vae_output = self.bert_vae_model(batch=batch)
         idx = 0
         display_dict = format_labeled_example(
-            masked_token_ids=batch["prior_input"][idx],
-            gold_labels=batch["prior_label"][idx],
+            masked_token_ids=batch["decoder_input"][idx],
+            gold_labels=batch["decoder_label"][idx],
             predictions=vae_output["logits"][idx].max(1).indices,
             tokenizer=self.tokenizer,
         )
@@ -428,11 +477,11 @@ class BertVaeTrainer:
             },
         )
         with torch.no_grad():
-            vae_output = self.bert_vae_model(batch=self.dummy_batch, do_sample=False)
+            vae_output = self.bert_vae_model(batch=self.dummy_batch)
         for idx in range(6):
             display_dict = format_labeled_example(
-                masked_token_ids=self.dummy_batch["prior_input"][idx],
-                gold_labels=self.dummy_batch["prior_label"][idx],
+                masked_token_ids=self.dummy_batch["decoder_input"][idx],
+                gold_labels=self.dummy_batch["decoder_label"][idx],
                 predictions=vae_output["logits"][idx].max(1).indices,
                 tokenizer=self.tokenizer,
             )
@@ -472,9 +521,9 @@ def cycle_dataloader(dataloader, num_steps):
 def format_labeled_example(masked_token_ids, gold_labels, predictions, tokenizer):
     """
     e.g.
-        masked_token_ids = batch["prior_input"][0]
-        gold_labels = batch["prior_label"][0]
-        predictions = prior_output.logits[0].max(-1).indices
+        masked_token_ids = batch["decoder_input"][0]
+        gold_labels = batch["decoder_label"][0]
+        predictions = decoder_output.logits[0].max(-1).indices
     """
     masked_token_ids = masked_token_ids.cpu().numpy()
     gold_labels = gold_labels.cpu().numpy()
@@ -517,8 +566,8 @@ def format_labeled_example(masked_token_ids, gold_labels, predictions, tokenizer
 def format_unlabeled_example(masked_token_ids, predictions, tokenizer):
     """
     e.g.
-        masked_token_ids = batch["prior_input"][0]
-        predictions = prior_output.logits[0].max(-1).indices
+        masked_token_ids = batch["decoder_input"][0]
+        predictions = decoder_output.logits[0].max(-1).indices
     """
     masked_token_ids = masked_token_ids.cpu().numpy()
     predictions = predictions.cpu().numpy()
