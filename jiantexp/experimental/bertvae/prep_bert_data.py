@@ -13,6 +13,7 @@ class RunConfiguration(zconf.RunConfig):
 
     # Config
     num_workers = zconf.attr(type=int, default=16)
+    mlm_probability = zconf.attr(type=float, default=0.15)
 
     # Data
     train_from = zconf.attr(type=int, default=0)
@@ -27,6 +28,7 @@ def main(args: RunConfiguration):
     bert_data_wrapper = bert_funcs.BertDataWrapper(
         tokenizer=tokenizer,
         num_workers=args.num_workers,
+        mlm_probability=args.mlm_probability,
     )
     wiki_train_data = datasets.load_dataset(
         "wikipedia",

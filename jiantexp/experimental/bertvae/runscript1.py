@@ -21,7 +21,8 @@ class RunConfiguration(zconf.RunConfig):
     eval_interval = zconf.attr(type=int, default=100)
     batch_size = zconf.attr(type=int, default=16)
     num_workers = zconf.attr(type=int, default=16)
-    kl_multiplier = zconf.attr(type=float, default=1.0)
+    kl_weight_scheduler_name = zconf.attr(type=str, default="ConstantScheduler")
+    kl_weight_scheduler_config = zconf.attr(type=str, default="1")
 
 
 def main(args: RunConfiguration):

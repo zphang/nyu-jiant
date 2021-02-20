@@ -9,6 +9,7 @@ import contextlib
 import itertools
 from transformers.optimization import AdamW, get_linear_schedule_with_warmup
 import jiant.utils.display as display
+import jiantexp.experimental.bertvae.kl_weight_schedulers as kl_weight_schedulers
 
 
 @dataclass
@@ -326,13 +327,16 @@ class BertVaeModel(nn.Module):
         }
         if "decoder_label" in batch:
             results["recon_loss"] = mlm_output.loss
-            results["kl_loss"] = self.kl_loss_function(
+            results["kl_loss_tensor"] = self.kl_loss_function(
                 z_loc=posterior_output["z_loc"],
                 z_logvar=posterior_output["z_logvar"],
                 prior_z_loc=prior_output["z_loc"],
                 prior_z_logvar=prior_output["z_logvar"],
+                reduce=False,
             )
+            results["kl_loss"] = results["kl_loss_tensor"].mean()
             results["total_loss"] = results["recon_loss"] + results["kl_loss"]
+        import pdb; pdb.set_trace()
         return results
 
     @classmethod
@@ -342,21 +346,24 @@ class BertVaeModel(nn.Module):
         return z_loc + eps*std
 
     @classmethod
-    def kl_loss_function(cls, z_loc, z_logvar, prior_z_loc=None, prior_z_logvar=None):
+    def kl_loss_function(cls, z_loc, z_logvar, prior_z_loc=None, prior_z_logvar=None, reduce=True):
         # see Appendix B from VAE paper:
         # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
         # https://arxiv.org/abs/1312.6114, Section Appendix B
         # also https://stats.stackexchange.com/questions/7440/kl-divergence-between-two-univariate-gaussians
-        batch_size = z_loc.shape[0]
         if prior_z_loc is None and prior_z_logvar is None:
             # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-            kl_loss_sum = -0.5 * torch.sum(1 + z_logvar - z_loc.pow(2) - z_logvar.exp())
+            kl_loss_sum = -0.5 * torch.sum(1 + z_logvar - z_loc.pow(2) - z_logvar.exp(), dim=1)
         else:
             kl_loss_sum = -0.5 * torch.sum(
                 1 + z_logvar - prior_z_logvar
-                - (z_logvar.exp() + (z_loc - prior_z_loc).pow(2)) / prior_z_logvar.exp()
+                - (z_logvar.exp() + (z_loc - prior_z_loc).pow(2)) / prior_z_logvar.exp(),
+                dim=1,
             )
-        kl_loss = kl_loss_sum / batch_size
+        if reduce:
+            kl_loss = kl_loss_sum.mean(0)
+        else:
+            kl_loss = kl_loss_sum
         return kl_loss
 
 
@@ -381,6 +388,7 @@ class BertVaeTrainer:
 
         self.optimizer = None
         self.scheduler = None
+        self.kl_weight_scheduler = None
         self.dummy_batch = None
 
     def setup(self):
@@ -391,6 +399,7 @@ class BertVaeTrainer:
             num_training_steps=self.args.num_steps,
         )
         self.dummy_batch = move_to_device(self.bert_data_wrapper.get_dummy_batch(), device=self.device)
+        self.kl_weight_scheduler = kl_weight_schedulers.create_kl_weight_scheduler(args=self.args)
 
     def do_train_val(self):
         self.bert_vae_model.train()
@@ -399,7 +408,11 @@ class BertVaeTrainer:
             batch = move_to_device(batch, device=self.device)
             self.optimizer.zero_grad()
             vae_output = self.bert_vae_model(batch=batch)
-            loss = vae_output["recon_loss"] + vae_output["kl_loss"] * self.args.kl_multiplier
+            train_kl_loss = self.kl_weight_scheduler.get_loss(
+                step=step,
+                kl_loss_tensor=vae_output["kl_loss_tensor"],
+            )
+            loss = vae_output["recon_loss"] + train_kl_loss
             loss.backward()
             train_loss += loss.item()
             self.optimizer.step()
@@ -410,7 +423,7 @@ class BertVaeTrainer:
                     100. * step / self.args.num_steps,
                     vae_output["total_loss"].item(),
                     vae_output["recon_loss"].item(),
-                    vae_output["kl_loss"].item(),
+                    train_kl_loss.item(),
                 ))
                 self.log_writer.write_entry(
                     "loss_train",
@@ -418,7 +431,7 @@ class BertVaeTrainer:
                         "step": step,
                         "total_loss": vae_output["total_loss"].item(),
                         "recon_loss": vae_output["recon_loss"].item(),
-                        "kl_loss": vae_output["kl_loss"].item(),
+                        "kl_loss": train_kl_loss.item(),
                     },
                 )
             if (step + 1) % self.args.eval_interval == 0:
@@ -446,6 +459,7 @@ class BertVaeTrainer:
             agg_recon_loss / total_size,
             agg_kl_loss / total_size,
         ))
+        import pdb; pdb.set_trace()
         self.log_writer.write_entry(
             "loss_val",
             {
