@@ -60,10 +60,15 @@ class BertDataWrapper:
         prior_input = (
             [self.PRIOR_TOKEN_ID] + masked_tokens + [tokenizer.sep_token_id]
         )
-        # [POSTERIOR] x [SEP] mask(x) [SEP]
+        # [POSTERIOR] x [SEP]
         posterior_input = (
-                [self.POSTERIOR_TOKEN_ID] + text_token_ids + [tokenizer.sep_token_id]
-                + masked_tokens + [tokenizer.sep_token_id]
+            [self.POSTERIOR_TOKEN_ID] + text_token_ids + [tokenizer.sep_token_id]
+        )
+        # [0] masked_x==MASK_TOKEN_ID [0]
+        #   Use for both prior and posterior
+        is_masked = [1 if token_id == self.MASK_TOKEN_ID else 0 for token_id in masked_tokens]
+        prior_token_type_ids = (
+            [0] + is_masked + [0]
         )
         return {
             "decoder_input": decoder_input,
@@ -71,6 +76,7 @@ class BertDataWrapper:
             "decoder_z_index": len(decoder_input) - 2,
             "prior_input": prior_input,
             "posterior_input": posterior_input,
+            "prior_token_type_ids": prior_token_type_ids,
         }
 
     def prep_bert_inputs_apply(self, examples):
@@ -86,11 +92,18 @@ class BertDataWrapper:
         decoder_z_index_ls = [example["decoder_z_index"] for example in examples]
         prior_input_ls = [example["prior_input"] for example in examples]
         posterior_input_ls = [example["posterior_input"] for example in examples]
+        prior_token_type_ids = [example["prior_token_type_ids"] for example in examples]
 
         decoder_input_outs = self.tokenizer.pad({"input_ids": decoder_input_ls}, return_tensors="pt")
         decoder_label_outs = self.tokenizer.pad({"input_ids": decoder_label_ls}, return_tensors="pt")
-        prior_input_outs = self.tokenizer.pad({"input_ids": prior_input_ls}, return_tensors="pt")
-        posterior_input_outs = self.tokenizer.pad({"input_ids": posterior_input_ls}, return_tensors="pt")
+        prior_input_outs = self.tokenizer.pad({
+            "input_ids": prior_input_ls,
+            "token_type_ids": prior_token_type_ids,
+        }, return_tensors="pt")
+        posterior_input_outs = self.tokenizer.pad({
+            "input_ids": posterior_input_ls,
+            "token_type_ids": prior_token_type_ids,
+        }, return_tensors="pt")
         # decoder_input_outs["attention_mask"] should be the same as decoder_label_outs["attention_mask"]
         return {
             "decoder_input": decoder_input_outs["input_ids"],
@@ -99,8 +112,10 @@ class BertDataWrapper:
             "decoder_z_index": torch.tensor(decoder_z_index_ls).long(),
             "prior_input": prior_input_outs["input_ids"],
             "prior_mask": prior_input_outs["attention_mask"],
+            "prior_token_type_ids": prior_input_outs["token_type_ids"],
             "posterior_input": posterior_input_outs["input_ids"],
             "posterior_mask": posterior_input_outs["attention_mask"],
+            "posterior_token_type_ids": posterior_input_outs["token_type_ids"],
         }
 
     def group_texts(self, examples):
@@ -202,20 +217,23 @@ class BertDataWrapper:
             ]
             prepped_inputs = {
                 "decoder_input": (
-                        [self.DECODER_TOKEN_ID] + masked_tokens + [self.tokenizer.sep_token_id]
-                        + [self.RESERVED_FOR_Z_TOKEN_ID] + [self.tokenizer.sep_token_id]
+                    [self.DECODER_TOKEN_ID] + masked_tokens + [self.tokenizer.sep_token_id]
+                    + [self.RESERVED_FOR_Z_TOKEN_ID] + [self.tokenizer.sep_token_id]
                 ),
                 "decoder_label": (
-                        [self.NON_MASKED_TARGET] + masked_labels + [self.NON_MASKED_TARGET] * 3
+                    [self.NON_MASKED_TARGET] + masked_labels + [self.NON_MASKED_TARGET] * 3
                 ),
                 "prior_input": (
-                        [self.PRIOR_TOKEN_ID] + masked_tokens + [self.tokenizer.sep_token_id]
+                    [self.PRIOR_TOKEN_ID] + masked_tokens + [self.tokenizer.sep_token_id]
                 ),
                 "posterior_input": (
-                        [self.POSTERIOR_TOKEN_ID] + text_token_ids + [self.tokenizer.sep_token_id]
-                        + masked_tokens + [self.tokenizer.sep_token_id]
+                    [self.POSTERIOR_TOKEN_ID] + text_token_ids + [self.tokenizer.sep_token_id]
+                ),
+                "prior_token_type_ids": (
+                    [0] + [1 if token_id == self.MASK_TOKEN_ID else 0 for token_id in masked_tokens] + [0]
                 ),
             }
+            prepped_inputs["posterior_token_type_ids"] = prepped_inputs["prior_token_type_ids"]
             prepped_inputs["decoder_z_index"] = len(prepped_inputs["decoder_input"]) - 2,
             prepped_inputs_list.append(prepped_inputs)
         return self.collate_fn(prepped_inputs_list)
@@ -238,10 +256,12 @@ class BertVaeModel(nn.Module):
         Requires:
             batch["prior_input"]
             batch["prior_mask"]
+            batch["token_type_ids"]
         """
         outputs = self.mlm_model.bert(
             input_ids=batch["prior_input"],
             attention_mask=batch["prior_mask"],
+            token_type_ids=batch["prior_token_type_ids"],
         )
         z_raw = outputs.last_hidden_state[:, 0, :]  # get CLS (first token)
         z_loc = self.z_loc_layer(z_raw)
@@ -264,6 +284,7 @@ class BertVaeModel(nn.Module):
         outputs = self.mlm_model.bert(
             input_ids=batch["posterior_input"],
             attention_mask=batch["posterior_mask"],
+            token_type_ids=batch["posterior_token_type_ids"],
         )
         z_raw = outputs.last_hidden_state[:, 0, :]  # get CLS (first token)
         z_loc = self.z_loc_layer(z_raw)
@@ -336,7 +357,6 @@ class BertVaeModel(nn.Module):
             )
             results["kl_loss"] = results["kl_loss_tensor"].mean()
             results["total_loss"] = results["recon_loss"] + results["kl_loss"]
-        import pdb; pdb.set_trace()
         return results
 
     @classmethod
@@ -459,7 +479,6 @@ class BertVaeTrainer:
             agg_recon_loss / total_size,
             agg_kl_loss / total_size,
         ))
-        import pdb; pdb.set_trace()
         self.log_writer.write_entry(
             "loss_val",
             {

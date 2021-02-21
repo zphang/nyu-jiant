@@ -30,8 +30,6 @@ class BudgetScheduler(KLWeightScheduler):
             budget = (self.num_steps - step) / (self.num_steps / 2)
         max_mask = ((kl_loss_tensor - budget) > 0.).float()
         kl = kl_loss_tensor * max_mask + (1. - max_mask) * budget
-        if step % 100 == 0:
-            import pdb; pdb.set_trace()
         return kl.mean()
 
 
