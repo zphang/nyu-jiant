@@ -1,3 +1,4 @@
+import os
 import torch
 from typing import List, Any
 from dataclasses import dataclass
@@ -240,12 +241,18 @@ class BertDataWrapper:
 
 
 class BertVaeModel(nn.Module):
-    def __init__(self, mlm_model):
+    def __init__(self, mlm_model, latent_token_mode="zindex", add_latent_linear=False):
         super().__init__()
         self.mlm_model = mlm_model
         self.hidden_size = mlm_model.config.hidden_size
         self.z_loc_layer = nn.Linear(self.hidden_size, self.hidden_size)
         self.z_scale_layer = nn.Linear(self.hidden_size, self.hidden_size)
+
+        self.latent_token_mode = latent_token_mode
+        self.add_latent_linear = add_latent_linear
+
+        if self.add_latent_linear:
+            self.latent_linear = nn.Linear(self.hidden_size, self.hidden_size)
 
     def prior_forward(self, batch):
         """
@@ -309,13 +316,25 @@ class BertVaeModel(nn.Module):
         """
         token_only_embeddings = self.mlm_model.bert.embeddings.word_embeddings(batch["decoder_input"])
         batch_size = z_sample.shape[0]
-        token_only_embeddings[
-            torch.arange(batch_size),
-            batch["decoder_z_index"],
-        ] = z_sample
+        if self.add_latent_linear:
+            z_sample = self.latent_linear(z_sample)
+        if self.latent_token_mode == "zindex":
+            token_only_embeddings[torch.arange(batch_size), batch["decoder_z_index"]] = z_sample
+            token_type_ids = None
+        elif self.latent_token_mode == "zindex_toktype":
+            token_only_embeddings[torch.arange(batch_size), batch["decoder_z_index"]] = z_sample
+            token_type_ids = torch.zeros_like(batch["decoder_input"]).long()
+            token_type_ids[torch.arange(batch_size), batch["decoder_z_index"]] = 1
+            token_type_ids = token_type_ids.to(batch["decoder_input"].device)
+        elif self.latent_token_mode == "cls":
+            token_only_embeddings[:, 0] = z_sample
+            token_type_ids = None
+        else:
+            raise KeyError(self.latent_token_mode)
         outputs = self.mlm_model.bert(
             attention_mask=batch["decoder_mask"],
             inputs_embeds=token_only_embeddings,
+            token_type_ids=token_type_ids,
         )
         prediction_scores = self.mlm_model.cls(outputs.last_hidden_state)
         masked_lm_loss = None
@@ -451,8 +470,14 @@ class BertVaeTrainer:
                         "step": step,
                         "total_loss": vae_output["total_loss"].item(),
                         "recon_loss": vae_output["recon_loss"].item(),
-                        "kl_loss": train_kl_loss.item(),
+                        "kl_loss": vae_output["kl_loss"].item(),
+                        "train_kl_loss": train_kl_loss.item(),
                     },
+                )
+            if self.args.save_interval != 0 and (step + 1) % self.args.save_interval == 0:
+                torch.save(
+                    self.bert_vae_model.cpu().state_dict(),
+                    os.path.join(self.args.output_fol, f"model___{step:09d}.p")
                 )
             if (step + 1) % self.args.eval_interval == 0:
                 self.do_val(step)
@@ -645,3 +670,13 @@ def format_color(msg, color):
     }
     code = color_dict[color]
     return f"\x1b[{code}m{msg}\x1b[0m"
+
+
+def make_single_example_batch(batch, idx=0, batch_size=None):
+    if batch_size is None:
+        batch_size = len(batch["decoder_input"])
+    new_batch = {}
+    for k, v in batch.items():
+        v_single = v[idx: idx+1]
+        new_batch[k] = torch.cat([v_single] * batch_size, dim=0)
+    return new_batch

@@ -19,10 +19,13 @@ class RunConfiguration(zconf.RunConfig):
     num_steps = zconf.attr(type=int, default=10000)
     log_interval = zconf.attr(type=int, default=10)
     eval_interval = zconf.attr(type=int, default=100)
+    save_interval = zconf.attr(type=int, default=0)
     batch_size = zconf.attr(type=int, default=16)
     num_workers = zconf.attr(type=int, default=16)
     kl_weight_scheduler_name = zconf.attr(type=str, default="ConstantScheduler")
     kl_weight_scheduler_config = zconf.attr(type=str, default="1")
+    latent_token_mode = zconf.attr(type=str, default="zindex")
+    add_latent_linear = zconf.attr(action="store_true")
 
 
 def main(args: RunConfiguration):
@@ -36,7 +39,11 @@ def main(args: RunConfiguration):
     )
     train_vae_dataset = datasets.load_from_disk(os.path.join(args.data_fol, "train"))
     val_vae_dataset = datasets.load_from_disk(os.path.join(args.data_fol, "val"))
-    bert_vae_model = bert_funcs.BertVaeModel(mlm_model=mlm_model).to(device)
+    bert_vae_model = bert_funcs.BertVaeModel(
+        mlm_model=mlm_model,
+        latent_token_mode=args.latent_token_mode,
+        add_latent_linear=args.add_latent_linear,
+    ).to(device)
     bert_vae_trainer = bert_funcs.BertVaeTrainer(
         bert_data_wrapper=bert_data_wrapper,
         bert_vae_model=bert_vae_model,

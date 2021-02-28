@@ -38,3 +38,5 @@ def create_kl_weight_scheduler(args) -> KLWeightScheduler:
         return ConstantScheduler(kl_weight=float(args.kl_weight_scheduler_config))
     elif args.kl_weight_scheduler_name == "BudgetScheduler":
         return BudgetScheduler(num_steps=args.num_steps)
+    else:
+        raise KeyError(args.kl_weight_scheduler_name)
