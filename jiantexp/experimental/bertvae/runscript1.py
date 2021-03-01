@@ -4,7 +4,9 @@ import torch
 import os
 
 import jiant.utils.zconf as zconf
-import jiantexp.experimental.bertvae.bert_funcs as bert_funcs
+import jiantexp.experimental.bertvae.data_wrappers as data_wrappers
+import jiantexp.experimental.bertvae.trainers as trainers
+import jiantexp.experimental.bertvae.models as models
 import zproto.zlogv1 as zlog
 
 
@@ -33,18 +35,18 @@ def main(args: RunConfiguration):
     tokenizer = transformers.BertTokenizerFast.from_pretrained("bert-base-cased")
     mlm_model = transformers.BertForMaskedLM.from_pretrained("bert-base-cased")
     device = torch.device("cuda:0")
-    bert_data_wrapper = bert_funcs.BertDataWrapper(
+    bert_data_wrapper = data_wrappers.BertDataWrapper(
         tokenizer=tokenizer,
         num_workers=args.num_workers,
     )
     train_vae_dataset = datasets.load_from_disk(os.path.join(args.data_fol, "train"))
     val_vae_dataset = datasets.load_from_disk(os.path.join(args.data_fol, "val"))
-    bert_vae_model = bert_funcs.BertVaeModel(
+    bert_vae_model = models.BertVaeModel(
         mlm_model=mlm_model,
         latent_token_mode=args.latent_token_mode,
         add_latent_linear=args.add_latent_linear,
     ).to(device)
-    bert_vae_trainer = bert_funcs.BertVaeTrainer(
+    bert_vae_trainer = trainers.BertVaeTrainer(
         bert_data_wrapper=bert_data_wrapper,
         bert_vae_model=bert_vae_model,
         train_dataloader=bert_data_wrapper.create_train_dataloader(

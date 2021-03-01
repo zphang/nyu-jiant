@@ -2,7 +2,7 @@ import os
 import datasets
 import transformers
 
-import jiantexp.experimental.bertvae.bert_funcs as bert_funcs
+import jiantexp.experimental.bertvae.data_wrappers as data_wrappers
 import jiant.utils.zconf as zconf
 
 
@@ -25,7 +25,7 @@ class RunConfiguration(zconf.RunConfig):
 def main(args: RunConfiguration):
     os.makedirs(args.data_fol, exist_ok=True)
     tokenizer = transformers.BertTokenizerFast.from_pretrained("bert-base-cased")
-    bert_data_wrapper = bert_funcs.BertDataWrapper(
+    bert_data_wrapper = data_wrappers.BertDataWrapper(
         tokenizer=tokenizer,
         num_workers=args.num_workers,
         mlm_probability=args.mlm_probability,
