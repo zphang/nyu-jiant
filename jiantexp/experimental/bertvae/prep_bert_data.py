@@ -1,5 +1,4 @@
 import os
-import datasets
 import transformers
 
 import jiantexp.experimental.bertvae.data_wrappers as data_wrappers
@@ -14,8 +13,10 @@ class RunConfiguration(zconf.RunConfig):
     # Config
     num_workers = zconf.attr(type=int, default=16)
     mlm_probability = zconf.attr(type=float, default=0.15)
+    max_seq_length = zconf.attr(type=int, default=256)
 
     # Data
+    data_name = zconf.attr(type=str, required=True)
     train_from = zconf.attr(type=int, default=0)
     train_to = zconf.attr(type=int, default=30000)
     val_from = zconf.attr(type=int, default=100000)
@@ -25,26 +26,19 @@ class RunConfiguration(zconf.RunConfig):
 def main(args: RunConfiguration):
     os.makedirs(args.data_fol, exist_ok=True)
     tokenizer = transformers.BertTokenizerFast.from_pretrained("bert-base-cased")
-    bert_data_wrapper = data_wrappers.BertDataWrapper(
+    bert_data_wrapper = data_wrappers.get_data_wrapper(
+        data_name=args.data_name,
         tokenizer=tokenizer,
         num_workers=args.num_workers,
+        max_seq_length=args.max_seq_length,
         mlm_probability=args.mlm_probability,
     )
-    wiki_train_data = datasets.load_dataset(
-        "wikipedia",
-        name="20200501.en",
-        split=datasets.ReadInstruction('train', from_=args.train_from, to=args.train_to, unit="abs"),
-    )
-    wiki_val_data = datasets.load_dataset(
-        "wikipedia",
-        name="20200501.en",
-        split=datasets.ReadInstruction('train', from_=args.val_from, to=args.val_to, unit="abs"),
-    )
+    datasets_dict = bert_data_wrapper.get_datasets(args=args)
     train_vae_dataset = bert_data_wrapper.prepare_vae_dataset(
-        text_dataset=wiki_train_data,
+        text_dataset=datasets_dict["train"],
     )
     val_vae_dataset = bert_data_wrapper.prepare_vae_dataset(
-        text_dataset=wiki_val_data,
+        text_dataset=datasets_dict["val"],
     )
     train_vae_dataset.save_to_disk(os.path.join(args.data_fol, "train"))
     val_vae_dataset.save_to_disk(os.path.join(args.data_fol, "val"))

@@ -16,7 +16,11 @@ class RunConfiguration(zconf.RunConfig):
     data_fol = zconf.attr(type=str, required=True)
     output_fol = zconf.attr(type=str, required=True)
 
+    # data
+    data_name = zconf.attr(type=str, required=True)
+
     # Training
+    optimizer_type = zconf.attr(type=str, default="adamw")
     learning_rate = zconf.attr(type=float, default=1e-5)
     num_steps = zconf.attr(type=int, default=10000)
     log_interval = zconf.attr(type=int, default=10)
@@ -35,7 +39,8 @@ def main(args: RunConfiguration):
     tokenizer = transformers.BertTokenizerFast.from_pretrained("bert-base-cased")
     mlm_model = transformers.BertForMaskedLM.from_pretrained("bert-base-cased")
     device = torch.device("cuda:0")
-    bert_data_wrapper = data_wrappers.BertDataWrapper(
+    bert_data_wrapper = data_wrappers.get_data_wrapper(
+        data_name=args.data_name,
         tokenizer=tokenizer,
         num_workers=args.num_workers,
     )

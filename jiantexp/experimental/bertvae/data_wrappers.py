@@ -1,5 +1,6 @@
+import datasets
 import torch
-from typing import List
+from typing import List, Optional, Tuple
 from dataclasses import dataclass
 import transformers
 from torch.utils.data.dataloader import DataLoader
@@ -22,21 +23,19 @@ class BertDataWrapper:
     # Arguments
     tokenizer: transformers.PreTrainedTokenizerBase
     max_seq_length: int = 256  # actual model sequence length
-    num_workers: int = 1
+    num_workers: int = 0
     mlm_probability: float = 0.15
 
     def __post_init__(self):
         # noinspection PyTypeChecker
-        self.data_collator = transformers.DataCollatorForLanguageModeling(
-            tokenizer=self.tokenizer,
-            mlm_probability=self.mlm_probability,
-        )
         self.max_text_length = (self.max_seq_length - 3) // 2
 
-    def prep_bert_inputs(self, text_token_ids: List[int], tokenizer, data_collator):
-        masked_tokens, masked_labels = data_collator.mask_tokens(
+    def prep_bert_inputs(self, text_token_ids: List[int], tokenizer):
+        masked_tokens, masked_labels = mask_tokens(
+            tokenizer=self.tokenizer,
             inputs=torch.tensor([text_token_ids]),
             special_tokens_mask=torch.zeros(len(text_token_ids)),
+            mlm_probability=self.mlm_probability
         )
 
         masked_tokens = masked_tokens[0].tolist()
@@ -78,7 +77,6 @@ class BertDataWrapper:
         return self.prep_bert_inputs(
             text_token_ids=examples["tokenized"],
             tokenizer=self.tokenizer,
-            data_collator=self.data_collator
         )
 
     def collate_fn(self, examples):
@@ -91,6 +89,8 @@ class BertDataWrapper:
 
         decoder_input_outs = self.tokenizer.pad({"input_ids": decoder_input_ls}, return_tensors="pt")
         decoder_label_outs = self.tokenizer.pad({"input_ids": decoder_label_ls}, return_tensors="pt")
+        decoder_label = decoder_label_outs["input_ids"]
+        decoder_label[decoder_label == self.tokenizer.pad_token_id] = self.NON_MASKED_TARGET
         prior_input_outs = self.tokenizer.pad({
             "input_ids": prior_input_ls,
             "token_type_ids": prior_token_type_ids,
@@ -103,7 +103,7 @@ class BertDataWrapper:
         return {
             "decoder_input": decoder_input_outs["input_ids"],
             "decoder_mask": decoder_input_outs["attention_mask"],
-            "decoder_label": decoder_label_outs["input_ids"],
+            "decoder_label": decoder_label,
             "decoder_z_index": torch.tensor(decoder_z_index_ls).long(),
             "prior_input": prior_input_outs["input_ids"],
             "prior_mask": prior_input_outs["attention_mask"],
@@ -127,28 +127,12 @@ class BertDataWrapper:
         }
         return result
 
+    def get_datasets(self, args):
+        # Todo: clean up use of args
+        raise NotImplementedError()
+
     def prepare_vae_dataset(self, text_dataset, seed=None):
-        tokenized_data = text_dataset.map(
-            lambda example: {
-                "tokenized": self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(example["text"]))
-            },
-            batched=False,
-            num_proc=self.num_workers,
-            remove_columns=["title", "text"],
-        )
-        chunked_tokenized_data = tokenized_data.map(
-            self.group_texts,
-            batched=True,
-            num_proc=self.num_workers,
-        )
-        with temporarily_set_rng(seed=seed):
-            vae_dataset = chunked_tokenized_data.map(
-                self.prep_bert_inputs_apply,
-                batched=False,
-                num_proc=self.num_workers,
-                remove_columns=["tokenized"],
-            )
-        return vae_dataset
+        raise NotImplementedError()
 
     def create_train_dataloader(self, train_vae_dataset, batch_size):
         train_dataloader = DataLoader(
@@ -237,14 +221,18 @@ class BertDataWrapper:
 def format_labeled_example(masked_token_ids, gold_labels, predictions, tokenizer):
     """
     e.g.
-        masked_token_ids = batch["decoder_input"][0]
-        gold_labels = batch["decoder_label"][0]
-        predictions = decoder_output.logits[0].max(-1).indices
+        masked_token_ids = batch["decoder_input"][idx]
+        gold_labels = batch["decoder_label"][idx]
+        predictions = decoder_output.logits[idx].max(-1).indices
     """
     masked_token_ids = masked_token_ids.cpu().numpy()
     gold_labels = gold_labels.cpu().numpy()
     predictions = predictions.cpu().numpy()
 
+    num_valid_tokens = (gold_labels != 0).sum().item()
+    masked_token_ids = masked_token_ids[:num_valid_tokens]
+    predictions = predictions[:num_valid_tokens]
+    masked_token_ids = masked_token_ids[:num_valid_tokens]
     is_masked = gold_labels != BertDataWrapper.NON_MASKED_TARGET
 
     masked_token_list = tokenizer.convert_ids_to_tokens(masked_token_ids)
@@ -256,26 +244,38 @@ def format_labeled_example(masked_token_ids, gold_labels, predictions, tokenizer
     pred_display_list = []
     gold_display_list_html = []
     pred_display_list_html = []
+    gold_tokens_list = []
+    pred_tokens_list = []
     for i, token in enumerate(masked_token_list):
         token_is_masked = is_masked[i]
         if token_is_masked:
             gold_token = gold_labels_token_list[i]
             pred_token = predictions_token_list[i]
+            longer_token_length = max(len(gold_token), len(pred_token))
+            gold_token = gold_token.center(longer_token_length)
+            pred_token = pred_token.center(longer_token_length)
+
             color = "green" if gold_token == pred_token else "red"
             gold_display_list.append(format_color(gold_token, color=color))
             pred_display_list.append(format_color(pred_token, color=color))
             gold_display_list_html.append(f"<span style='color:{color}'>{gold_token}</span>")
             pred_display_list_html.append(f"<span style='color:{color}'>{pred_token}</span>")
+            gold_tokens_list.append(gold_token)
+            pred_tokens_list.append(pred_token)
         else:
             gold_display_list.append(token)
             pred_display_list.append(token)
             gold_display_list_html.append(token)
             pred_display_list_html.append(token)
+            gold_tokens_list.append(token)
+            pred_tokens_list.append(token)
     return {
         "gold_str": " ".join(gold_display_list),
         "pred_str": " ".join(pred_display_list),
         "gold_str_html": " ".join(gold_display_list_html),
         "pred_str_html": " ".join(pred_display_list_html),
+        "gold_tokens": gold_display_list,
+        "pred_tokens": pred_tokens_list,
     }
 
 
@@ -324,3 +324,129 @@ def make_single_example_batch(batch, idx=0, batch_size=None):
         v_single = v[idx: idx+1]
         new_batch[k] = torch.cat([v_single] * batch_size, dim=0)
     return new_batch
+
+
+class WikiDataWrapper(BertDataWrapper):
+    def prepare_vae_dataset(self, text_dataset, seed=None):
+        tokenized_data = text_dataset.map(
+            lambda example: {
+                "tokenized": self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(example["text"]))
+            },
+            batched=False,
+            num_proc=self.num_workers,
+            remove_columns=["title", "text"],
+        )
+        chunked_tokenized_data = tokenized_data.map(
+            self.group_texts,
+            batched=True,
+            num_proc=self.num_workers,
+        )
+        with temporarily_set_rng(seed=seed):
+            vae_dataset = chunked_tokenized_data.map(
+                self.prep_bert_inputs_apply,
+                batched=False,
+                num_proc=self.num_workers,
+                remove_columns=["tokenized"],
+            )
+        return vae_dataset
+
+    @classmethod
+    def get_datasets(cls, args):
+        wiki_train_data = datasets.load_dataset(
+            "wikipedia",
+            name="20200501.en",
+            split=datasets.ReadInstruction('train', from_=args.train_from, to=args.train_to, unit="abs"),
+        )
+        wiki_val_data = datasets.load_dataset(
+            "wikipedia",
+            name="20200501.en",
+            split=datasets.ReadInstruction('train', from_=args.val_from, to=args.val_to, unit="abs"),
+        )
+        return {
+            "train": wiki_train_data,
+            "val": wiki_val_data,
+        }
+
+
+class YelpDataWrapper(BertDataWrapper):
+
+    @classmethod
+    def get_datasets(cls, args):
+        yelp_train_data = datasets.load_dataset(
+            "yelp_polarity",
+            split=datasets.ReadInstruction('train', from_=args.train_from, to=args.train_to, unit="abs"),
+        )
+        yelp_val_data = datasets.load_dataset(
+            "yelp_polarity",
+            split=datasets.ReadInstruction('train', from_=args.val_from, to=args.val_to, unit="abs"),
+        )
+        return {
+            "train": yelp_train_data,
+            "val": yelp_val_data,
+        }
+
+    def prepare_vae_dataset(self, text_dataset, seed=None):
+        from nltk import tokenize
+        tokenized_data = text_dataset.map(
+            lambda examples_batch: {
+                "tokenized": [
+                    self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(sent))[:self.max_text_length]
+                    for raw_text in examples_batch["text"]
+                    for line in raw_text.encode('utf8').decode('unicode_escape').splitlines()
+                    for sent in tokenize.sent_tokenize(line)
+                    if len(line) > 50
+                ]
+            },
+            batched=True,
+            num_proc=self.num_workers,
+            remove_columns=list(text_dataset[0].keys()),
+        )
+        with temporarily_set_rng(seed=seed):
+            vae_dataset = tokenized_data.map(
+                self.prep_bert_inputs_apply,
+                batched=False,
+                num_proc=self.num_workers,
+                remove_columns=["tokenized"],
+            )
+        return vae_dataset
+
+
+def get_data_wrapper_class(data_name):
+    return {
+        "wiki": WikiDataWrapper,
+        "yelp": YelpDataWrapper,
+    }[data_name]
+
+
+def get_data_wrapper(data_name, **kwargs):
+    data_wrapper_class = get_data_wrapper_class(data_name)
+    return data_wrapper_class(**kwargs)
+
+
+def mask_tokens(
+        tokenizer,
+        inputs: torch.Tensor,
+        mlm_probability: float = 0.15,
+        special_tokens_mask: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original.
+    From: DataCollatorForLanguageModeling.mask_tokens
+    """
+    labels = inputs.clone()
+    # We sample a few tokens in each sequence for MLM training (with probability `mlm_probability`)
+    probability_matrix = torch.full(labels.shape, mlm_probability)
+    if special_tokens_mask is None:
+        special_tokens_mask = [
+            tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in labels.tolist()
+        ]
+        special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
+    else:
+        special_tokens_mask = special_tokens_mask.bool()
+
+    probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
+    masked_indices = torch.bernoulli(probability_matrix).bool()
+    labels[~masked_indices] = -100  # We only compute loss on masked tokens
+
+    inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+    return inputs, labels

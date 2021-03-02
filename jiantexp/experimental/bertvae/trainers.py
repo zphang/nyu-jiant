@@ -2,6 +2,7 @@ import os
 import torch
 from typing import Any
 from transformers.optimization import AdamW, get_linear_schedule_with_warmup
+from torch.optim import SGD
 import jiant.utils.display as display
 import jiantexp.experimental.bertvae.kl_weight_schedulers as kl_weight_schedulers
 import jiantexp.experimental.bertvae.data_wrappers as data_wrappers
@@ -33,7 +34,12 @@ class BertVaeTrainer:
         self.dummy_batch = None
 
     def setup(self):
-        self.optimizer = AdamW(self.bert_vae_model.parameters(), lr=self.args.learning_rate)
+        if self.args.optimizer_type == "adamw":
+            self.optimizer = AdamW(self.bert_vae_model.parameters(), lr=self.args.learning_rate)
+        elif self.args.optimizer_type == "sgd":
+            self.optimizer = SGD(self.bert_vae_model.parameters(), lr=self.args.learning_rate)
+        else:
+            raise KeyError(self.args.optimizer_type)
         self.scheduler = get_linear_schedule_with_warmup(
             self.optimizer,
             num_warmup_steps=self.args.num_steps / 10,
@@ -78,7 +84,7 @@ class BertVaeTrainer:
                 )
             if self.args.save_interval != 0 and (step + 1) % self.args.save_interval == 0:
                 torch.save(
-                    self.bert_vae_model.cpu().state_dict(),
+                    self.bert_vae_model.state_dict(),
                     os.path.join(self.args.output_fol, f"model___{step:09d}.p")
                 )
             if (step + 1) % self.args.eval_interval == 0:
