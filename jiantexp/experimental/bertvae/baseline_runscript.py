@@ -36,7 +36,7 @@ class RunConfiguration(zconf.RunConfig):
 
     # Training only
     learning_rate = zconf.attr(type=float, default=1e-5)
-    num_steps = zconf.attr(type=int, default=20000)
+    num_steps = zconf.attr(type=int, default=25000)
     save_path = zconf.attr(type=str, default=None)
     log_interval = zconf.attr(type=int, default=500)
 

@@ -8,6 +8,7 @@ import jiant.proj.main.modeling.taskmodels as taskmodels
 import jiant.utils.python.io as py_io
 import jiant.utils.transformer_utils as transformer_utils
 import jiant.utils.torch_utils as torch_utils
+from jiant.shared.model_setup import ModelArchitectures
 
 
 class ExtendedEncoder(nn.Module):
@@ -15,6 +16,10 @@ class ExtendedEncoder(nn.Module):
         super().__init__()
         self.frozen_encoder = frozen_encoder
         self.pooler = pooler
+
+    @property
+    def model_arch(self):
+        return ModelArchitectures.from_encoder(self.frozen_encoder)
 
     def forward(self, input_ids, input_mask, segment_ids):
         frozen_act = get_frozen_act(
@@ -236,19 +241,34 @@ def mean_pool(x, mask):
 
 
 def get_frozen_act(frozen_encoder, input_ids, input_mask, segment_ids):
+    model_arch = ModelArchitectures.from_encoder(frozen_encoder)
     with transformer_utils.output_hidden_states_context(encoder=frozen_encoder):
         with torch.no_grad():
-            _, _, frozen_act = frozen_encoder(
+            frozen_encoder_output = frozen_encoder(
                 input_ids=input_ids,
                 token_type_ids=segment_ids,
                 attention_mask=input_mask,
             )
+            if model_arch == ModelArchitectures.ROBERTA:
+                _, _, frozen_act = frozen_encoder_output
+            elif model_arch == ModelArchitectures.ALBERT:
+                _, _, frozen_act = frozen_encoder_output
+            elif model_arch == ModelArchitectures.ELECTRA:
+                _, frozen_act = frozen_encoder_output
+            else:
+                raise KeyError(model_arch)
     return frozen_act
 
 
 def create_encoder(model_type, pooler_config, device=None):
     if model_type.startswith("roberta-"):
         frozen_encoder = transformers.RobertaModel.from_pretrained(model_type).eval()
+        torch_utils.set_requires_grad(frozen_encoder.named_parameters(), requires_grad=False)
+    elif model_type.startswith("albert-"):
+        frozen_encoder = transformers.AlbertModel.from_pretrained(model_type).eval()
+        torch_utils.set_requires_grad(frozen_encoder.named_parameters(), requires_grad=False)
+    elif model_type.startswith("electra-"):
+        frozen_encoder = transformers.ElectraModel.from_pretrained(f"google/{model_type}").eval()
         torch_utils.set_requires_grad(frozen_encoder.named_parameters(), requires_grad=False)
     else:
         raise KeyError(model_type)

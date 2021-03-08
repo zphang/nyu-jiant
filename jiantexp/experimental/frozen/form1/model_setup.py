@@ -22,8 +22,14 @@ def setup_jiant_model(
         model_type=model_type,
         pooler_config=pooler_config,
     )
-    assert model_type.startswith("roberta-")
-    tokenizer = transformers.RobertaTokenizer.from_pretrained(model_type)
+    if model_type.startswith("roberta-"):
+        tokenizer = transformers.RobertaTokenizer.from_pretrained(model_type)
+    elif model_type.startswith("albert-"):
+        tokenizer = transformers.AlbertTokenizer.from_pretrained(model_type)
+    elif model_type.startswith("electra-"):
+        tokenizer = transformers.ElectraTokenizer.from_pretrained(f"google/{model_type}")
+    else:
+        raise KeyError(model_type)
     taskmodels_dict = {
         taskmodel_name: create_taskmodel(
             task=task_dict[task_name_list[0]],  # Take the first task

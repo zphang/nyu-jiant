@@ -15,7 +15,7 @@ def get_attn(jiant_model, batch, task):
             model_output = wrap_jiant_forward(
                 jiant_model=jiant_model, batch=batch, task=task, compute_loss=False,
             )
-    return model_output.other[0]
+    return model_output.other[-1]
 
 
 class FrozenAttnRunner(jiant_runner.JiantRunner):
