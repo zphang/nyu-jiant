@@ -32,6 +32,7 @@ class RunConfiguration(zconf.RunConfig):
     kl_weight_scheduler_config = zconf.attr(type=str, default="1")
     latent_token_mode = zconf.attr(type=str, default="zindex")
     add_latent_linear = zconf.attr(action="store_true")
+    iw_sampling_k = zconf.attr(type=int, default=1)
 
 
 def main(args: RunConfiguration):

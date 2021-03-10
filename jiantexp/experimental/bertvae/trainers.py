@@ -88,9 +88,9 @@ class BertVaeTrainer:
                     os.path.join(self.args.output_fol, f"model___{step:09d}.p")
                 )
             if (step + 1) % self.args.eval_interval == 0:
-                self.do_val(step)
+                self.do_full_val(step)
 
-    def do_val(self, step):
+    def do_val(self):
         self.bert_vae_model.eval()
         with torch.no_grad():
             agg_total_loss = 0
@@ -105,22 +105,35 @@ class BertVaeTrainer:
                 agg_recon_loss += vae_output["recon_loss"].item() * batch_size
                 agg_kl_loss += vae_output["kl_loss"].item() * batch_size
                 total_size += batch_size
+        self.bert_vae_model.train()
+        results = {
+            "agg_total_loss": agg_total_loss,
+            "agg_recon_loss": agg_recon_loss,
+            "agg_kl_loss": agg_kl_loss,
+            "total_size": total_size,
+        }
+        return results
+
+
+    def do_full_val(self, step):
+        val_results = self.do_val()
         print('[{}/{} ({:.0f}%)]\t V-Loss: {:.6f}\tV-Recon-L: {:.6f}\tV-KL-L: {:.6f}'.format(
             step, self.args.num_steps,
             100. * step / self.args.num_steps,
-            agg_total_loss / total_size,
-            agg_recon_loss / total_size,
-            agg_kl_loss / total_size,
+            val_results["agg_total_loss"] / val_results["total_size"],
+            val_results["agg_recon_loss"] / val_results["total_size"],
+            val_results["agg_kl_loss"] / val_results["total_size"],
         ))
         self.log_writer.write_entry(
             "loss_val",
             {
                 "step": step,
-                "total_loss": agg_total_loss / total_size,
-                "recon_loss": agg_recon_loss / total_size,
-                "kl_loss": agg_kl_loss / total_size,
+                "total_loss": val_results["agg_total_loss"] / val_results["total_size"],
+                "recon_loss": val_results["agg_recon_loss"] / val_results["total_size"],
+                "kl_loss": val_results["agg_kl_loss"] / val_results["total_size"],
             },
         )
+        self.bert_vae_model.eval()
         batch = next(iter(self.val_dataloader))
         batch = move_to_device(batch, device=self.device)
         with torch.no_grad():

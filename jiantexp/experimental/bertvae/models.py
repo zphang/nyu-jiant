@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers.models.bert.modeling_bert import MaskedLMOutput
 import jiantexp.experimental.bertvae.data_wrappers as data_wrappers
 
@@ -118,11 +119,33 @@ class BertVaeModel(nn.Module):
             attentions=outputs.attentions,
         )
 
-    def forward(self, batch):
+    def forward(self, batch,
+                forward_mode="single",
+                iw_sampling_k=None,
+                multi_sampling_k=None,
+                ):
         posterior_output = self.posterior_forward(batch)
         prior_output = self.prior_forward(batch)
-        z_sample = self.sample_z(z_loc=posterior_output["z_loc"], z_logvar=posterior_output["z_logvar"])
-        mlm_output = self.decoder_forward(batch=batch, z_sample=z_sample)
+        if forward_mode == "single":
+            z_sample, mlm_output = self.simple_decode(batch=batch, posterior_output=posterior_output)
+        elif forward_mode == "iw_inference":
+            assert iw_sampling_k is not None
+            z_sample, mlm_output = self.iw_inference_decode(
+                batch=batch,
+                prior_output=prior_output,
+                posterior_output=posterior_output,
+                iw_sampling_k=iw_sampling_k,
+            )
+        elif forward_mode == "multi_sampling":
+            assert multi_sampling_k is not None
+            z_sample, mlm_output = self.multi_sample_decode(
+                batch=batch,
+                posterior_output=posterior_output,
+                multi_sample_k=multi_sampling_k,
+            )
+        else:
+            raise KeyError(forward_mode)
+
         results = {
             "z_sample": z_sample,
             "z_loc": posterior_output["z_loc"],
@@ -141,6 +164,78 @@ class BertVaeModel(nn.Module):
             results["kl_loss"] = results["kl_loss_tensor"].mean()
             results["total_loss"] = results["recon_loss"] + results["kl_loss"]
         return results
+
+    def simple_decode(self, batch, posterior_output):
+        z_sample = self.sample_z(z_loc=posterior_output["z_loc"], z_logvar=posterior_output["z_logvar"])
+        mlm_output = self.decoder_forward(batch=batch, z_sample=z_sample)
+        return z_sample, mlm_output
+
+    def iw_inference_decode(self, batch, prior_output, posterior_output, iw_sampling_k):
+        # ONLY FOR INFERENCE
+        batch_size, hidden_dim = posterior_output["z_loc"].shape
+        prior_dist = torch.distributions.normal.Normal(prior_output["z_loc"], torch.exp(prior_output["z_logvar"] / 2))
+        posterior_dist = torch.distributions.normal.Normal(posterior_output["z_loc"],
+                                                           torch.exp(posterior_output["z_logvar"] / 2))
+        logits_ls = []
+        z_sample_ls = []
+        weight_ls = []
+        for k in range(iw_sampling_k):
+            z_sample = self.sample_z(z_loc=posterior_output["z_loc"], z_logvar=posterior_output["z_logvar"])
+            mlm_output = self.decoder_forward(batch=batch, z_sample=z_sample)
+            weight = torch.exp(prior_dist.log_prob(z_sample).sum(-1) - posterior_dist.log_prob(z_sample).sum(-1))
+            logits_ls.append(mlm_output.logits)
+            z_sample_ls.append(z_sample)
+            weight_ls.append(weight)
+        token_probs = F.softmax(torch.stack(logits_ls, dim=0), dim=-1)
+        weights = torch.stack(weight_ls, dim=0).view(iw_sampling_k, batch_size, 1, 1)
+        reweighted_token_probs = (weights * token_probs).mean(0)
+        reweighted_logits = torch.log(reweighted_token_probs)
+        loss_fct = self.get_loss_fct()
+        masked_lm_loss = loss_fct(
+            reweighted_logits.view(-1, self.mlm_model.config.vocab_size),
+            target=batch["decoder_label"].view(-1)
+        ) / batch_size
+        z_samples = torch.stack(z_sample_ls, dim=0)
+        mlm_output = MaskedLMOutput(
+            loss=masked_lm_loss,
+            logits=reweighted_logits,
+            hidden_states=None,
+            attentions=None,
+        )
+        return z_samples, mlm_output
+
+    def multi_sample_decode(self, batch, posterior_output, multi_sample_k):
+        # Meant for inference, but I guess it works for training too?
+        batch_size, hidden_dim = posterior_output["z_loc"].shape
+        logits_ls = []
+        z_sample_ls = []
+        for k in range(multi_sample_k):
+            z_sample = self.sample_z(z_loc=posterior_output["z_loc"], z_logvar=posterior_output["z_logvar"])
+            mlm_output = self.decoder_forward(batch=batch, z_sample=z_sample)
+            logits_ls.append(mlm_output.logits)
+            z_sample_ls.append(z_sample)
+        all_token_probs = F.softmax(torch.stack(logits_ls, dim=0), dim=-1)
+        combined_logits = torch.log(all_token_probs.mean(0))
+        loss_fct = self.get_loss_fct()
+        masked_lm_loss = loss_fct(
+            combined_logits.view(-1, self.mlm_model.config.vocab_size),
+            target=batch["decoder_label"].view(-1)
+        ) / batch_size
+        z_samples = torch.stack(z_sample_ls, dim=0)
+        mlm_output = MaskedLMOutput(
+            loss=masked_lm_loss,
+            logits=combined_logits,
+            hidden_states=None,
+            attentions=None,
+        )
+        return z_samples, mlm_output
+
+    @classmethod
+    def get_loss_fct(cls):
+        return nn.CrossEntropyLoss(
+            ignore_index=data_wrappers.BertDataWrapper.NON_MASKED_TARGET,  # Clean up?
+            reduction="sum",
+        )
 
     @classmethod
     def sample_z(cls, z_loc, z_logvar):
