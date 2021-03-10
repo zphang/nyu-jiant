@@ -21,6 +21,7 @@ class RunConfiguration(zconf.RunConfig):
 
     # Training
     optimizer_type = zconf.attr(type=str, default="adamw")
+    scheduler_type = zconf.attr(type=str, default="linear")
     learning_rate = zconf.attr(type=float, default=1e-5)
     num_steps = zconf.attr(type=int, default=10000)
     log_interval = zconf.attr(type=int, default=10)
@@ -33,6 +34,8 @@ class RunConfiguration(zconf.RunConfig):
     latent_token_mode = zconf.attr(type=str, default="zindex")
     add_latent_linear = zconf.attr(action="store_true")
     iw_sampling_k = zconf.attr(type=int, default=1)
+
+    do_lagrangian = zconf.attr(action="store_true")
 
 
 def main(args: RunConfiguration):
@@ -51,6 +54,7 @@ def main(args: RunConfiguration):
         mlm_model=mlm_model,
         latent_token_mode=args.latent_token_mode,
         add_latent_linear=args.add_latent_linear,
+        do_lagrangian=args.do_lagrangian,
     ).to(device)
     bert_vae_trainer = trainers.BertVaeTrainer(
         bert_data_wrapper=bert_data_wrapper,

@@ -2,7 +2,7 @@ import os
 import torch
 from typing import Any
 from transformers.optimization import AdamW, get_linear_schedule_with_warmup
-from torch.optim import SGD
+from torch.optim import SGD, RMSprop
 import jiant.utils.display as display
 import jiantexp.experimental.bertvae.kl_weight_schedulers as kl_weight_schedulers
 import jiantexp.experimental.bertvae.data_wrappers as data_wrappers
@@ -28,44 +28,69 @@ class BertVaeTrainer:
         self.device = torch.device("cuda:0")
         self.tokenizer: Any = self.bert_data_wrapper.tokenizer
 
-        self.optimizer = None
-        self.scheduler = None
+        self.mega_optimizer = None
         self.kl_weight_scheduler = None
         self.dummy_batch = None
 
     def setup(self):
-        if self.args.optimizer_type == "adamw":
-            self.optimizer = AdamW(self.bert_vae_model.parameters(), lr=self.args.learning_rate)
-        elif self.args.optimizer_type == "sgd":
-            self.optimizer = SGD(self.bert_vae_model.parameters(), lr=self.args.learning_rate)
-        else:
-            raise KeyError(self.args.optimizer_type)
-        self.scheduler = get_linear_schedule_with_warmup(
-            self.optimizer,
-            num_warmup_steps=self.args.num_steps / 10,
-            num_training_steps=self.args.num_steps,
-        )
+        self.setup_mega_optimizer()
         self.dummy_batch = move_to_device(self.bert_data_wrapper.get_dummy_batch(), device=self.device)
         self.kl_weight_scheduler = kl_weight_schedulers.create_kl_weight_scheduler(args=self.args)
+
+    def setup_mega_optimizer(self):
+        optimizer_dict_list = []
+        lag_parameters = [
+            p[1] for p in filter(
+                lambda p: p[0] == "lag_weight", self.bert_vae_model.named_parameters())]
+        model_parameters = [
+            p[1] for p in filter(
+                lambda p: p[1].requires_grad and p[0] != "lag_weight.weight", self.bert_vae_model.named_parameters())
+        ]
+        if self.args.optimizer_type == "adamw":
+            model_optimizer = AdamW(model_parameters, lr=self.args.learning_rate)
+        elif self.args.optimizer_type == "sgd":
+            model_optimizer = SGD(model_parameters, lr=self.args.learning_rate)
+        else:
+            raise KeyError(self.args.optimizer_type)
+        optimizer_dict_list.append({"optimizer": model_optimizer, "name": "model", "do_flip": False})
+
+        if self.args.do_lagrangian:
+            lag_optimizer = RMSprop(lag_parameters, lr=self.args.learning_rate)
+            optimizer_dict_list.append({"optimizer": lag_optimizer, "name": "lag", "do_flip": True})
+
+        if self.args.scheduler_type == "linear":
+            for optimizer_dict in optimizer_dict_list:
+                optimizer_dict["scheduler"] = get_linear_schedule_with_warmup(
+                    optimizer_dict["optimizer"],
+                    num_warmup_steps=self.args.num_steps / 10,
+                    num_training_steps=self.args.num_steps,
+                )
+        elif self.args.scheduler_type == "none":
+            for optimizer_dict in optimizer_dict_list:
+                # noinspection PyTypeChecker
+                optimizer_dict["scheduler"] = None
+        else:
+            raise KeyError(self.args.scheduler_type)
+        self.mega_optimizer = MegaOptimizer(optimizer_dict_list=optimizer_dict_list)
 
     def do_train_val(self):
         self.bert_vae_model.train()
         train_loss = 0
         for step, batch in enumerate(cycle_dataloader(self.train_dataloader, num_steps=self.args.num_steps)):
             batch = move_to_device(batch, device=self.device)
-            self.optimizer.zero_grad()
+            self.mega_optimizer.zero_grad()
             vae_output = self.bert_vae_model(batch=batch)
             train_kl_loss = self.kl_weight_scheduler.get_loss(
                 step=step,
+                model=self.bert_vae_model,
                 kl_loss_tensor=vae_output["kl_loss_tensor"],
             )
             loss = vae_output["recon_loss"] + train_kl_loss
             loss.backward()
             train_loss += loss.item()
-            self.optimizer.step()
-            self.scheduler.step()
+            self.mega_optimizer.step()
             if (step + 1) % self.args.log_interval == 0:
-                print('[{}/{} ({:.0f}%)]\tLoss: {:.6f}\tRecon-L: {:.6f}\tKL-L: {:.6f}'.format(
+                print('[{}/{} ({:.0f}%)]\t V-Loss: {:.4f}\tV-Recon-L: {:.4f}\tV-KL-L: {:.4f}'.format(
                     step, self.args.num_steps,
                     100. * step / self.args.num_steps,
                     vae_output["total_loss"].item(),
@@ -117,7 +142,7 @@ class BertVaeTrainer:
 
     def do_full_val(self, step):
         val_results = self.do_val()
-        print('[{}/{} ({:.0f}%)]\t V-Loss: {:.6f}\tV-Recon-L: {:.6f}\tV-KL-L: {:.6f}'.format(
+        print('[{}/{} ({:.0f}%)]\t V-Loss: {:.4f}\tV-Recon-L: {:.4f}\tV-KL-L: {:.4f}'.format(
             step, self.args.num_steps,
             100. * step / self.args.num_steps,
             val_results["agg_total_loss"] / val_results["total_size"],
@@ -178,3 +203,23 @@ class BertVaeTrainer:
             )
         print("=====\n")
         self.bert_vae_model.train()
+
+
+class MegaOptimizer:
+    def __init__(self, optimizer_dict_list):
+        self.optimizer_dict_list = optimizer_dict_list
+
+    def step(self):
+        for optimizer_dict in self.optimizer_dict_list:
+            if optimizer_dict["do_flip"]:
+                for group in optimizer_dict["optimizer"].param_groups:
+                    for p in group['params']:
+                        p.grad = -1 * p.grad
+        for optimizer_dict in self.optimizer_dict_list:
+            optimizer_dict["optimizer"].step()
+            if optimizer_dict["scheduler"] is not None:
+                optimizer_dict["scheduler"].step()
+
+    def zero_grad(self):
+        for optimizer_dict in self.optimizer_dict_list:
+            optimizer_dict["optimizer"].zero_grad()

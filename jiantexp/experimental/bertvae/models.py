@@ -7,7 +7,7 @@ import jiantexp.experimental.bertvae.data_wrappers as data_wrappers
 
 
 class BertVaeModel(nn.Module):
-    def __init__(self, mlm_model, latent_token_mode="zindex", add_latent_linear=False):
+    def __init__(self, mlm_model, latent_token_mode="zindex", add_latent_linear=False, do_lagrangian=False):
         super().__init__()
         self.mlm_model = mlm_model
         self.hidden_size = mlm_model.config.hidden_size
@@ -16,9 +16,13 @@ class BertVaeModel(nn.Module):
 
         self.latent_token_mode = latent_token_mode
         self.add_latent_linear = add_latent_linear
+        self.do_lagrangian = do_lagrangian
 
         if self.add_latent_linear:
             self.latent_linear = nn.Linear(self.hidden_size, self.hidden_size)
+
+        if self.do_lagrangian:
+            self.lag_weight = nn.Parameter(torch.tensor([1.01]))
 
     def prior_forward(self, batch):
         """
@@ -181,7 +185,7 @@ class BertVaeModel(nn.Module):
         z_sample_ls = []
         log_weight_ls = []
         for k in range(iw_sampling_k):
-            z_sample = self.sample_z(z_loc=prior_output["z_loc"], z_logvar=prior_output["z_logvar"])
+            z_sample = self.sample_z(z_loc=posterior_dist["z_loc"], z_logvar=posterior_dist["z_logvar"])
             mlm_output = self.decoder_forward(batch=batch, z_sample=z_sample)
             log_weight = prior_dist.log_prob(z_sample).sum(-1) - posterior_dist.log_prob(z_sample).sum(-1)
             logits_ls.append(mlm_output.logits)

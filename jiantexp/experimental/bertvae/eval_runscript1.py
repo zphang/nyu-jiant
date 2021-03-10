@@ -27,6 +27,7 @@ class RunConfiguration(zconf.RunConfig):
     num_workers = zconf.attr(type=int, default=16)
     latent_token_mode = zconf.attr(type=str, default="zindex")
     add_latent_linear = zconf.attr(action="store_true")
+    do_lagrangian = zconf.attr(action="store_true")
     iw_sampling_k = zconf.attr(type=int, default=None)
     multi_sampling_k = zconf.attr(type=int, default=None)
 
@@ -45,6 +46,7 @@ def main(args: RunConfiguration):
         mlm_model=mlm_model,
         latent_token_mode=args.latent_token_mode,
         add_latent_linear=args.add_latent_linear,
+        do_lagrangian=args.do_lagrangian,
     )
     bert_vae_model.load_state_dict(torch.load(args.model_path))
     bert_vae_model = bert_vae_model.to(device)
