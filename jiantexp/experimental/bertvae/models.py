@@ -129,9 +129,9 @@ class BertVaeModel(nn.Module):
         prior_output = self.prior_forward(batch)
         if forward_mode == "single":
             z_sample, mlm_output = self.simple_decode(batch=batch, posterior_output=posterior_output)
-        elif forward_mode == "iw_inference":
+        elif forward_mode == "iw_unconditional_inference":
             assert iw_sampling_k is not None
-            z_sample, mlm_output = self.iw_inference_decode(
+            z_sample, mlm_output = self.iw_unconditional_inference_decode(
                 batch=batch,
                 prior_output=prior_output,
                 posterior_output=posterior_output,
@@ -171,7 +171,7 @@ class BertVaeModel(nn.Module):
         mlm_output = self.decoder_forward(batch=batch, z_sample=z_sample)
         return z_sample, mlm_output
 
-    def iw_inference_decode(self, batch, prior_output, posterior_output, iw_sampling_k):
+    def iw_unconditional_inference_decode(self, batch, prior_output, posterior_output, iw_sampling_k):
         # ONLY FOR INFERENCE
         batch_size, hidden_dim = posterior_output["z_loc"].shape
         prior_dist = torch.distributions.normal.Normal(prior_output["z_loc"], torch.exp(prior_output["z_logvar"] / 2))
@@ -181,7 +181,7 @@ class BertVaeModel(nn.Module):
         z_sample_ls = []
         log_weight_ls = []
         for k in range(iw_sampling_k):
-            z_sample = self.sample_z(z_loc=posterior_output["z_loc"], z_logvar=posterior_output["z_logvar"])
+            z_sample = self.sample_z(z_loc=prior_output["z_loc"], z_logvar=prior_output["z_logvar"])
             mlm_output = self.decoder_forward(batch=batch, z_sample=z_sample)
             log_weight = prior_dist.log_prob(z_sample).sum(-1) - posterior_dist.log_prob(z_sample).sum(-1)
             logits_ls.append(mlm_output.logits)
