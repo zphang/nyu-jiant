@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -178,18 +179,17 @@ class BertVaeModel(nn.Module):
                                                            torch.exp(posterior_output["z_logvar"] / 2))
         logits_ls = []
         z_sample_ls = []
-        weight_ls = []
+        log_weight_ls = []
         for k in range(iw_sampling_k):
             z_sample = self.sample_z(z_loc=posterior_output["z_loc"], z_logvar=posterior_output["z_logvar"])
             mlm_output = self.decoder_forward(batch=batch, z_sample=z_sample)
-            weight = torch.exp(prior_dist.log_prob(z_sample).sum(-1) - posterior_dist.log_prob(z_sample).sum(-1))
+            log_weight = prior_dist.log_prob(z_sample).sum(-1) - posterior_dist.log_prob(z_sample).sum(-1)
             logits_ls.append(mlm_output.logits)
             z_sample_ls.append(z_sample)
-            weight_ls.append(weight)
-        token_probs = F.softmax(torch.stack(logits_ls, dim=0), dim=-1)
-        weights = torch.stack(weight_ls, dim=0).view(iw_sampling_k, batch_size, 1, 1)
-        reweighted_token_probs = (weights * token_probs).mean(0)
-        reweighted_logits = torch.log(reweighted_token_probs)
+            log_weight_ls.append(log_weight)
+        log_token_probs = F.log_softmax(torch.stack(logits_ls, dim=0), dim=-1)
+        log_weights = torch.stack(log_weight_ls, dim=0).view(iw_sampling_k, batch_size, 1, 1)
+        reweighted_logits = torch.logsumexp(log_weights + log_token_probs, dim=0) - np.log(iw_sampling_k)
         loss_fct = self.get_loss_fct()
         masked_lm_loss = loss_fct(
             reweighted_logits.view(-1, self.mlm_model.config.vocab_size),
