@@ -145,10 +145,10 @@ class BertDataWrapper:
         )
         return train_dataloader
 
-    def create_val_dataloader(self, val_vae_dataset, batch_size):
+    def create_val_dataloader(self, val_vae_dataset, batch_size, eval_multiplier=2):
         val_dataloader = DataLoader(
             val_vae_dataset,
-            batch_size=batch_size * 2,
+            batch_size=batch_size * eval_multiplier,
             shuffle=False,
             collate_fn=self.collate_fn,
             drop_last=True,
@@ -225,9 +225,9 @@ def format_labeled_example(masked_token_ids, gold_labels, predictions, tokenizer
         gold_labels = batch["decoder_label"][idx]
         predictions = decoder_output.logits[idx].max(-1).indices
     """
-    masked_token_ids = masked_token_ids.cpu().numpy()
-    gold_labels = gold_labels.cpu().numpy()
-    predictions = predictions.cpu().numpy()
+    masked_token_ids = masked_token_ids.cpu().numpy().copy()
+    gold_labels = gold_labels.cpu().numpy().copy()
+    predictions = predictions.cpu().numpy().copy()
 
     num_valid_tokens = (gold_labels != 0).sum().item()
     masked_token_ids = masked_token_ids[:num_valid_tokens]
@@ -285,8 +285,8 @@ def format_unlabeled_example(masked_token_ids, predictions, tokenizer):
         masked_token_ids = batch["decoder_input"][0]
         predictions = decoder_output.logits[0].max(-1).indices
     """
-    masked_token_ids = masked_token_ids.cpu().numpy()
-    predictions = predictions.cpu().numpy()
+    masked_token_ids = masked_token_ids.cpu().numpy().copy()
+    predictions = predictions.cpu().numpy().copy()
 
     is_masked = masked_token_ids == BertDataWrapper.MASK_TOKEN_ID
 
@@ -303,6 +303,45 @@ def format_unlabeled_example(masked_token_ids, predictions, tokenizer):
             pred_display_list.append(token)
     pred_str = " ".join(pred_display_list)
     return {"pred_str": pred_str}
+
+
+def format_label_only(masked_token_ids, gold_labels, tokenizer):
+    """
+    e.g.
+        masked_token_ids = batch["decoder_input"][idx]
+        gold_labels = batch["decoder_label"][idx]
+    """
+    masked_token_ids = masked_token_ids.cpu().numpy().copy()
+    gold_labels = gold_labels.cpu().numpy().copy()
+
+    num_valid_tokens = (gold_labels != 0).sum().item()
+    masked_token_ids = masked_token_ids[:num_valid_tokens]
+    masked_token_ids = masked_token_ids[:num_valid_tokens]
+    is_masked = gold_labels != BertDataWrapper.NON_MASKED_TARGET
+
+    masked_token_list = tokenizer.convert_ids_to_tokens(masked_token_ids)
+    gold_labels[~is_masked] = 0  # so convert_ids_to_tokens doesn't complain about -100
+    gold_labels_token_list = tokenizer.convert_ids_to_tokens(gold_labels)
+
+    gold_display_list = []
+    gold_display_list_html = []
+    gold_tokens_list = []
+    for i, token in enumerate(masked_token_list):
+        token_is_masked = is_masked[i]
+        if token_is_masked:
+            gold_token = gold_labels_token_list[i]
+            gold_display_list.append(format_color(gold_token, color="blue"))
+            gold_display_list_html.append(f"<span style='color:blue'>{gold_token}</span>")
+            gold_tokens_list.append(gold_token)
+        else:
+            gold_display_list.append(token)
+            gold_display_list_html.append(token)
+            gold_tokens_list.append(token)
+    return {
+        "gold_str": " ".join(gold_display_list),
+        "gold_str_html": " ".join(gold_display_list_html),
+        "gold_tokens": gold_display_list,
+    }
 
 
 def format_color(msg, color):

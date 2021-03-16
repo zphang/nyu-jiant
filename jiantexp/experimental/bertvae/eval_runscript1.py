@@ -29,6 +29,7 @@ class RunConfiguration(zconf.RunConfig):
     add_latent_linear = zconf.attr(action="store_true")
     do_lagrangian = zconf.attr(action="store_true")
     iw_sampling_k = zconf.attr(type=int, default=None)
+    iw_sampling_debug_mode = zconf.attr(type=str, default="ratio_pq_sample_q")
     multi_sampling_k = zconf.attr(type=int, default=None)
 
 
@@ -67,6 +68,7 @@ def main(args: RunConfiguration):
                 batch=batch,
                 forward_mode=args.forward_mode,
                 iw_sampling_k=args.iw_sampling_k,
+                iw_sampling_debug_mode=args.iw_sampling_debug_mode,
                 multi_sampling_k=args.multi_sampling_k,
             )
             agg_total_loss += vae_output["total_loss"].item() * batch_size
@@ -83,6 +85,7 @@ def main(args: RunConfiguration):
         "avg_kl_loss": float(agg_kl_loss / total_size),
     }
     display.show_json(results)
+    io.create_containing_folder(args.output_path)
     io.write_json(results, args.output_path)
 
 

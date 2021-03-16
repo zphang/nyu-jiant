@@ -127,6 +127,7 @@ class BertVaeModel(nn.Module):
     def forward(self, batch,
                 forward_mode="single",
                 iw_sampling_k=None,
+                iw_sampling_debug_mode=None,
                 multi_sampling_k=None,
                 ):
         posterior_output = self.posterior_forward(batch)
@@ -140,6 +141,7 @@ class BertVaeModel(nn.Module):
                 prior_output=prior_output,
                 posterior_output=posterior_output,
                 iw_sampling_k=iw_sampling_k,
+                iw_sampling_debug_mode=iw_sampling_debug_mode,
             )
         elif forward_mode == "multi_sampling":
             assert multi_sampling_k is not None
@@ -175,19 +177,51 @@ class BertVaeModel(nn.Module):
         mlm_output = self.decoder_forward(batch=batch, z_sample=z_sample)
         return z_sample, mlm_output
 
-    def iw_unconditional_inference_decode(self, batch, prior_output, posterior_output, iw_sampling_k):
-        # ONLY FOR INFERENCE
+    def iw_unconditional_inference_decode(self, batch, prior_output, posterior_output, iw_sampling_k,
+                                          iw_sampling_debug_mode="ratio_pq_sample_q"):
+        """
+        # === ONLY USE THIS FOR INFERENCE === #
+        The correct IW should be w=p/q, sampling from q ("ratio_pq_sample_q")
+        I'm including several other options here for debugging purposes
+        """
+        assert iw_sampling_debug_mode in (
+            "ratio_pq_sample_q",
+            "ratio_1_sample_q",
+            "ratio_qp_sample_q",
+            "ratio_pq_sample_p",
+            "ratio_1_sample_p",
+            "ratio_qp_sample_p",
+        )
+        _, ratio_mode, _, sample_from = iw_sampling_debug_mode.split("_")
+        # === ONLY FOR INFERENCE === #
         batch_size, hidden_dim = posterior_output["z_loc"].shape
-        prior_dist = torch.distributions.normal.Normal(prior_output["z_loc"], torch.exp(prior_output["z_logvar"] / 2))
-        posterior_dist = torch.distributions.normal.Normal(posterior_output["z_loc"],
-                                                           torch.exp(posterior_output["z_logvar"] / 2))
+        prior_dist = torch.distributions.normal.Normal(
+            loc=prior_output["z_loc"],
+            scale=torch.exp(prior_output["z_logvar"] / 2),
+        )
+        posterior_dist = torch.distributions.normal.Normal(
+            loc=posterior_output["z_loc"],
+            scale=torch.exp(posterior_output["z_logvar"] / 2),
+        )
         logits_ls = []
         z_sample_ls = []
         log_weight_ls = []
         for k in range(iw_sampling_k):
-            z_sample = self.sample_z(z_loc=posterior_dist["z_loc"], z_logvar=posterior_dist["z_logvar"])
+            if sample_from == "q":
+                z_sample = self.sample_z(z_loc=posterior_output["z_loc"], z_logvar=posterior_output["z_logvar"])
+            elif sample_from == "p":
+                z_sample = self.sample_z(z_loc=prior_output["z_loc"], z_logvar=prior_output["z_logvar"])
+            else:
+                raise RuntimeError()
             mlm_output = self.decoder_forward(batch=batch, z_sample=z_sample)
-            log_weight = prior_dist.log_prob(z_sample).sum(-1) - posterior_dist.log_prob(z_sample).sum(-1)
+            if ratio_mode == "1":
+                log_weight = prior_dist.log_prob(z_sample).sum(-1) - prior_dist.log_prob(z_sample).sum(-1)
+            elif ratio_mode == "pq":
+                log_weight = prior_dist.log_prob(z_sample).sum(-1) - posterior_dist.log_prob(z_sample).sum(-1)
+            elif ratio_mode == "qp":
+                log_weight = posterior_dist.log_prob(z_sample).sum(-1) - prior_dist.log_prob(z_sample).sum(-1)
+            else:
+                raise KeyError()
             logits_ls.append(mlm_output.logits)
             z_sample_ls.append(z_sample)
             log_weight_ls.append(log_weight)
@@ -219,7 +253,7 @@ class BertVaeModel(nn.Module):
             logits_ls.append(mlm_output.logits)
             z_sample_ls.append(z_sample)
         all_token_probs = F.softmax(torch.stack(logits_ls, dim=0), dim=-1)
-        combined_logits = torch.log(all_token_probs.mean(0))
+        combined_logits = torch.log(all_token_probs.mean(dim=0))
         loss_fct = self.get_loss_fct()
         masked_lm_loss = loss_fct(
             combined_logits.view(-1, self.mlm_model.config.vocab_size),
