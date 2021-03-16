@@ -145,6 +145,7 @@ def run_loop(args: RunConfiguration, checkpoint=None):
                 verbose=True,
                 save_best_model=args.do_save,
                 load_best_model=True,
+                save_last_model=args.do_save,
                 log_writer=quick_init_out.log_writer,
             )
             if is_resumed:

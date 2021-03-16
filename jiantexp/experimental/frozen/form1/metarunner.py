@@ -18,6 +18,7 @@ class Form1Metarunner(JiantMetarunner):
         verbose: bool = True,
         save_best_model: bool = True,
         load_best_model: bool = True,
+        save_last_model: bool = True,
         log_writer: BaseZLogger = PRINT_LOGGER,
     ):
         super().__init__(
@@ -31,6 +32,7 @@ class Form1Metarunner(JiantMetarunner):
             verbose=verbose,
             save_best_model=save_best_model,
             load_best_model=load_best_model,
+            save_last_model=save_last_model,
             log_writer=log_writer,
         )
 
