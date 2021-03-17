@@ -35,6 +35,9 @@ class RunConfiguration(zconf.RunConfig):
 
     num_examples = zconf.attr(type=int, default=8192)
 
+    #
+    sample_epsilon = zconf.attr(type=float, default=1e-5)
+
 
 def main(args: RunConfiguration):
     # === Setup === #
@@ -54,6 +57,7 @@ def main(args: RunConfiguration):
         latent_token_mode=model_configs["latent_token_mode"],
         add_latent_linear=model_configs["add_latent_linear"],
         do_lagrangian=model_configs["do_lagrangian"],
+        sample_epsilon=args.sample_epsilon,
     )
     bert_vae_model.load_state_dict(torch.load(args.model_path))
     bert_vae_model = bert_vae_model.to(device)

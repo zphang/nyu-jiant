@@ -7,7 +7,10 @@ import jiantexp.experimental.bertvae.data_wrappers as data_wrappers
 
 
 class BertVaeModel(nn.Module):
-    def __init__(self, mlm_model, latent_token_mode="zindex", add_latent_linear=False, do_lagrangian=False):
+    def __init__(
+            self, mlm_model, latent_token_mode="zindex", add_latent_linear=False, do_lagrangian=False,
+            sample_epsilon=1e-5,
+    ):
         super().__init__()
         self.mlm_model = mlm_model
         self.hidden_size = mlm_model.config.hidden_size
@@ -17,6 +20,7 @@ class BertVaeModel(nn.Module):
         self.latent_token_mode = latent_token_mode
         self.add_latent_linear = add_latent_linear
         self.do_lagrangian = do_lagrangian
+        self.sample_epsilon = sample_epsilon
 
         if self.add_latent_linear:
             self.latent_linear = nn.Linear(self.hidden_size, self.hidden_size)
@@ -275,9 +279,8 @@ class BertVaeModel(nn.Module):
             reduction="sum",
         )
 
-    @classmethod
-    def sample_z(cls, z_loc, z_logvar):
-        std = torch.exp(0.5 * z_logvar) + 1e-5
+    def sample_z(self, z_loc, z_logvar):
+        std = torch.exp(0.5 * z_logvar) + self.sample_epsilon
         eps = torch.randn_like(std)
         return z_loc + eps*std
 
